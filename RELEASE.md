@@ -6,43 +6,24 @@ Update `Hearsay/Info.plist`:
 - `CFBundleShortVersionString` — user-facing version (e.g., `1.0.4`)
 - `CFBundleVersion` — increment build number
 
-## 2. Build (Universal Binary)
+## 2. Build, Sign, Notarize, and Create DMG
+
+Hearsay releases are Apple Silicon-only because the Parakeet backend depends on FluidAudio/Core ML components that do not build for `x86_64`.
 
 ```bash
-xcodegen generate
-xcodebuild -project Hearsay.xcodeproj -scheme Hearsay -configuration Release \
-  ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO \
-  clean build
-mkdir -p dist
-cp -R ~/Library/Developer/Xcode/DerivedData/Hearsay-*/Build/Products/Release/Hearsay.app dist/
-
-# Verify universal binary
-file dist/Hearsay.app/Contents/MacOS/Hearsay
-# Should show: Mach-O universal binary with 2 architectures: [x86_64] [arm64]
+./scripts/release.sh
 ```
 
-## 3. Bundle qwen_asr binary
+Expected output:
 
 ```bash
-cp ~/work/misc/qwen-asr/qwen_asr dist/Hearsay.app/Contents/MacOS/
+dist/Hearsay-VERSION.dmg
 ```
 
-## 4. Sign
+Verify the release artifact:
 
 ```bash
-codesign --force --deep --options runtime --timestamp \
-  --sign "Developer ID Application" \
-  dist/Hearsay.app
-```
-
-## 5. Create DMG & Notarize
-
-```bash
-hdiutil create -volname "Hearsay" -srcfolder dist/Hearsay.app -ov -format UDZO dist/Hearsay-VERSION.dmg
-
-xcrun notarytool submit dist/Hearsay-VERSION.dmg \
-  --keychain-profile "notarytool" \
-  --wait
+xcrun stapler validate dist/Hearsay-VERSION.dmg
 ```
 
 If it fails, check the log:
@@ -50,23 +31,17 @@ If it fails, check the log:
 xcrun notarytool log SUBMISSION_ID --keychain-profile "notarytool"
 ```
 
-## 6. Staple
+## 3. Commit & Tag
 
 ```bash
-xcrun stapler staple dist/Hearsay-VERSION.dmg
-```
-
-## 7. Commit & Tag
-
-```bash
-git add Hearsay/Info.plist
+git add Hearsay/Info.plist scripts/release.sh RELEASE.md
 git commit -m "Bump version to VERSION"
 git tag -a vVERSION -m "Release vVERSION"
 git push origin main
 git push origin vVERSION
 ```
 
-## 8. GitHub release
+## 4. GitHub release
 
 ```bash
 gh release create vVERSION dist/Hearsay-VERSION.dmg \
@@ -74,7 +49,7 @@ gh release create vVERSION dist/Hearsay-VERSION.dmg \
   --notes "Release notes"
 ```
 
-## 9. Update Homebrew tap
+## 5. Update Homebrew tap
 
 ```bash
 # Get SHA

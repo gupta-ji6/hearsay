@@ -84,6 +84,8 @@ fi
 # Clean previous builds
 echo -e "${YELLOW}Cleaning previous builds...${NC}"
 rm -rf build/Release
+rm -rf "build/$APP_NAME.xcarchive"
+rm -f "build/$APP_NAME.zip" build/export-options.plist
 rm -rf dist
 mkdir -p dist
 
@@ -98,11 +100,19 @@ xcodebuild -project Hearsay.xcodeproj \
     -configuration Release \
     -derivedDataPath build \
     -archivePath "build/$APP_NAME.xcarchive" \
+    -skipMacroValidation \
     archive \
     CODE_SIGN_IDENTITY="$SIGNING_IDENTITY" \
     DEVELOPMENT_TEAM="$TEAM_ID" \
     CODE_SIGN_STYLE="Manual" \
-    2>&1 | grep -E "(error:|warning:|BUILD|Archive)"
+    ARCHS="arm64" \
+    ONLY_ACTIVE_ARCH=NO \
+    2>&1 | tee /tmp/hearsay-release-archive.log | grep -E "(error:|warning:|BUILD|Archive)" || true
+ARCHIVE_STATUS=${PIPESTATUS[0]}
+if [ "$ARCHIVE_STATUS" -ne 0 ]; then
+    echo -e "${RED}Archive failed! Full log: /tmp/hearsay-release-archive.log${NC}"
+    exit "$ARCHIVE_STATUS"
+fi
 
 # Export from archive
 echo -e "${YELLOW}Exporting app from archive...${NC}"
@@ -128,7 +138,12 @@ xcodebuild -exportArchive \
     -archivePath "build/$APP_NAME.xcarchive" \
     -exportPath "$BUILD_DIR" \
     -exportOptionsPlist build/export-options.plist \
-    2>&1 | grep -E "(error:|Export)"
+    2>&1 | tee /tmp/hearsay-release-export.log | grep -E "(error:|Export)" || true
+EXPORT_STATUS=${PIPESTATUS[0]}
+if [ "$EXPORT_STATUS" -ne 0 ]; then
+    echo -e "${RED}Export failed! Full log: /tmp/hearsay-release-export.log${NC}"
+    exit "$EXPORT_STATUS"
+fi
 
 # Bundle qwen_asr binary
 echo -e "${YELLOW}Bundling qwen_asr binary...${NC}"
