@@ -89,6 +89,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Create necessary directories
         createDirectories()
+        configureLocalCaches()
         
         // Initialize components
         setupStatusBar()
@@ -131,6 +132,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         try? fm.createDirectory(at: Constants.modelsDirectory, withIntermediateDirectories: true)
         try? fm.createDirectory(at: Constants.historyDirectory, withIntermediateDirectories: true)
         try? fm.createDirectory(at: Constants.figuresDirectory, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: Constants.fluidAudioCacheDirectory, withIntermediateDirectories: true)
+    }
+
+    /// Keep FluidAudio/Parakeet caches under Hearsay's Application Support folder.
+    private func configureLocalCaches() {
+        setenv("XDG_CACHE_HOME", Constants.fluidAudioCacheDirectory.path, 1)
+        logger.info("XDG_CACHE_HOME set to \(Constants.fluidAudioCacheDirectory.path)")
     }
     
     private func setupStatusBar() {
@@ -333,6 +341,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     transcriber = WhisperTranscriber(modelName: model.rawValue)
                     statusBar.updateModelName(model.displayName)
                     logger.info("Using Whisper model: \(model.rawValue)")
+                }
+                return true
+
+            case .parakeet:
+                guard let parakeetModel = model.parakeetModel else {
+                    return false
+                }
+
+                let identifier = "parakeet:\(model.rawValue)"
+                if currentModelIdentifier != identifier {
+                    currentModelIdentifier = identifier
+                    transcriber = ParakeetTranscriber(model: parakeetModel)
+                    statusBar.updateModelName(model.displayName)
+                    logger.info("Using Parakeet model: \(model.rawValue)")
                 }
                 return true
             }

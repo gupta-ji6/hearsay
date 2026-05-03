@@ -37,6 +37,17 @@ final class ModelDownloaderTests: XCTestCase {
         XCTAssertNil(model.whisperVariant)
     }
 
+    func testParakeetMetadata() {
+        let model = ModelDownloader.Model.parakeetMultilingualV3
+
+        XCTAssertEqual(model.backend, .parakeet)
+        XCTAssertEqual(model.parakeetModel, .multilingualV3)
+        XCTAssertNil(model.huggingFaceId)
+        XCTAssertNil(model.whisperVariant)
+        XCTAssertTrue(model.files.isEmpty)
+        XCTAssertGreaterThan(model.estimatedSize, 0)
+    }
+
     func testSelectedModelPreferenceRoundTrip() {
         let downloader = ModelDownloader.shared
         downloader.setSelectedModelPreference(.whisperSmallEn)

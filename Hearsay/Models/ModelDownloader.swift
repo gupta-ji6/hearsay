@@ -5,7 +5,7 @@ import WhisperKit
 private let downloadLogger = Logger(subsystem: "com.swair.hearsay", category: "download")
 
 /// Downloads models with progress reporting.
-/// Supports both qwen_asr (file-by-file HuggingFace download) and WhisperKit variants.
+/// Supports qwen_asr, WhisperKit, and FluidAudio/Parakeet variants.
 final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDelegate {
     
     static let shared = ModelDownloader()
@@ -14,6 +14,7 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
     enum Backend {
         case qwenASR
         case whisperKit
+        case parakeet
     }
     
     // Model definitions
@@ -26,11 +27,21 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
         case whisperTinyEn = "openai_whisper-tiny.en"
         case whisperSmallEn = "openai_whisper-small.en"
 
+        // FluidAudio Parakeet models
+        case parakeetEnglishV2 = "parakeet-tdt-0.6b-v2-coreml"
+        case parakeetMultilingualV3 = "parakeet-tdt-0.6b-v3-coreml"
+
         static var availableModels: [Model] {
-            if Constants.supportsWhisperKitModels {
-                return Self.allCases
+            Self.allCases.filter { model in
+                switch model.backend {
+                case .qwenASR:
+                    return true
+                case .whisperKit:
+                    return Constants.supportsWhisperKitModels
+                case .parakeet:
+                    return Constants.supportsParakeetModels
+                }
             }
-            return Self.allCases.filter { $0.backend == .qwenASR }
         }
         
         var backend: Backend {
@@ -39,6 +50,8 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
                 return .qwenASR
             case .whisperTinyEn, .whisperSmallEn:
                 return .whisperKit
+            case .parakeetEnglishV2, .parakeetMultilingualV3:
+                return .parakeet
             }
         }
         
@@ -48,6 +61,10 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
             case .large: return "Qwen Quality (1.7B)"
             case .whisperTinyEn: return "Whisper tiny.en"
             case .whisperSmallEn: return "Whisper small.en"
+            case .parakeetEnglishV2:
+                return ParakeetModel.englishV2.displayName
+            case .parakeetMultilingualV3:
+                return ParakeetModel.multilingualV3.displayName
             }
         }
         
@@ -57,6 +74,10 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
             case .large: return "Better accuracy, larger size"
             case .whisperTinyEn: return "Fastest local transcription (English)"
             case .whisperSmallEn: return "Better accuracy than tiny.en (English)"
+            case .parakeetEnglishV2:
+                return ParakeetModel.englishV2.description
+            case .parakeetMultilingualV3:
+                return ParakeetModel.multilingualV3.description
             }
         }
         
@@ -64,7 +85,7 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
             switch self {
             case .small: return "Qwen/Qwen3-ASR-0.6B"
             case .large: return "Qwen/Qwen3-ASR-1.7B"
-            case .whisperTinyEn, .whisperSmallEn: return nil
+            case .whisperTinyEn, .whisperSmallEn, .parakeetEnglishV2, .parakeetMultilingualV3: return nil
             }
         }
 
@@ -72,9 +93,13 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
             switch self {
             case .whisperTinyEn, .whisperSmallEn:
                 return rawValue
-            case .small, .large:
+            case .small, .large, .parakeetEnglishV2, .parakeetMultilingualV3:
                 return nil
             }
+        }
+
+        var parakeetModel: ParakeetModel? {
+            ParakeetModel(rawValue: rawValue)
         }
 
         /// Cache path under Constants.whisperModelsRootDirectory
@@ -86,7 +111,7 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
                 return ["argmaxinc", "whisperkit-coreml", "openai_whisper-tiny.en"]
             case .whisperSmallEn:
                 return ["argmaxinc", "whisperkit-coreml", "openai_whisper-small.en"]
-            case .small, .large:
+            case .small, .large, .parakeetEnglishV2, .parakeetMultilingualV3:
                 return nil
             }
         }
@@ -111,7 +136,7 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
                     "vocab.json",
                     "merges.txt"
                 ]
-            case .whisperTinyEn, .whisperSmallEn:
+            case .whisperTinyEn, .whisperSmallEn, .parakeetEnglishV2, .parakeetMultilingualV3:
                 return []
             }
         }
@@ -122,6 +147,10 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
             case .large: return 3_400_000_000  // ~3.4 GB
             case .whisperTinyEn: return 75_000_000 // ~75 MB
             case .whisperSmallEn: return 466_000_000 // ~466 MB
+            case .parakeetEnglishV2:
+                return ParakeetModel.englishV2.estimatedSize
+            case .parakeetMultilingualV3:
+                return ParakeetModel.multilingualV3.estimatedSize
             }
         }
         
@@ -146,6 +175,7 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
     private var downloadSession: URLSession?
     private var currentTask: URLSessionDownloadTask?
     private var whisperDownloadTask: Task<Void, Never>?
+    private var parakeetDownloadTask: Task<Void, Never>?
     private var completionHandler: ((Bool) -> Void)?
     
     private override init() {
@@ -200,7 +230,7 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
                 legacyPathComponents = ["openai", "whisper-tiny.en"]
             case .whisperSmallEn:
                 legacyPathComponents = ["openai", "whisper-small.en"]
-            case .small, .large:
+            case .small, .large, .parakeetEnglishV2, .parakeetMultilingualV3:
                 legacyPathComponents = []
             }
 
@@ -212,6 +242,14 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
             }
 
             return false
+        case .parakeet:
+            guard let parakeetModel = model.parakeetModel else {
+                return false
+            }
+
+            return parakeetModel.cachedDirectories().contains { directory in
+                ParakeetModel.containsCompiledModel(in: directory)
+            }
         }
     }
     
@@ -265,6 +303,10 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
         case .whisperKit:
             try? FileManager.default.createDirectory(at: Constants.whisperModelsDirectory, withIntermediateDirectories: true)
             downloadWhisperModel(model)
+        case .parakeet:
+            try? FileManager.default.createDirectory(at: Constants.fluidAudioCacheDirectory, withIntermediateDirectories: true)
+            setenv("XDG_CACHE_HOME", Constants.fluidAudioCacheDirectory.path, 1)
+            downloadParakeetModel(model)
         }
     }
     
@@ -272,6 +314,7 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
     func cancel() {
         currentTask?.cancel()
         whisperDownloadTask?.cancel()
+        parakeetDownloadTask?.cancel()
         downloadSession?.invalidateAndCancel()
         isDownloading = false
         error = "Download cancelled"
@@ -295,6 +338,43 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
             guard let self else { return }
             do {
                 _ = try await WhisperKit.download(variant: variant, downloadBase: Constants.whisperModelsDirectory) { progress in
+                    let fraction = progress.fractionCompleted
+                    DispatchQueue.main.async {
+                        self.fileProgress = fraction
+                        self.overallProgress = fraction
+                        self.downloadedBytes = Int64(Double(model.estimatedSize) * fraction)
+                        self.totalBytes = model.estimatedSize
+                    }
+                }
+
+                DispatchQueue.main.async {
+                    self.downloadComplete()
+                }
+            } catch {
+                if Task.isCancelled { return }
+                DispatchQueue.main.async {
+                    self.error = "Failed to download \(model.displayName): \(error.localizedDescription)"
+                    self.downloadFailed()
+                }
+            }
+        }
+    }
+
+    private func downloadParakeetModel(_ model: Model) {
+        guard let parakeetModel = model.parakeetModel else {
+            error = "Invalid Parakeet variant"
+            downloadFailed()
+            return
+        }
+
+        currentFile = model.displayName
+        fileProgress = 0
+        overallProgress = 0
+
+        parakeetDownloadTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await ParakeetClient.shared.ensureLoaded(parakeetModel) { progress in
                     let fraction = progress.fractionCompleted
                     DispatchQueue.main.async {
                         self.fileProgress = fraction
@@ -369,7 +449,7 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
             let totalFiles = Double(max(1, model.files.count))
             let currentFileContribution = fileProgress / totalFiles
             overallProgress = (filesComplete / totalFiles) + currentFileContribution
-        case .whisperKit:
+        case .whisperKit, .parakeet:
             overallProgress = fileProgress
         }
     }
@@ -385,6 +465,7 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
         completionHandler = nil
         currentTask = nil
         whisperDownloadTask = nil
+        parakeetDownloadTask = nil
     }
     
     private func downloadFailed() {
@@ -395,6 +476,7 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
         completionHandler = nil
         currentTask = nil
         whisperDownloadTask = nil
+        parakeetDownloadTask = nil
     }
     
     // MARK: - URLSessionDownloadDelegate

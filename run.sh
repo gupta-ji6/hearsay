@@ -51,7 +51,13 @@ xcodebuild -project Hearsay.xcodeproj \
     -scheme Hearsay \
     -configuration Debug \
     -derivedDataPath build \
-    build 2>&1 | grep -E "^(Build|error:|warning:|\*\*)" || true
+    -skipMacroValidation \
+    build 2>&1 | tee /tmp/hearsay-build.log | grep -E "^(Build|error:|warning:|\*\*)" || true
+BUILD_STATUS=${PIPESTATUS[0]}
+if [ "$BUILD_STATUS" -ne 0 ]; then
+    echo -e "${RED}Build failed! Full log: /tmp/hearsay-build.log${NC}"
+    exit "$BUILD_STATUS"
+fi
 
 # Check build succeeded
 if [ ! -d "$APP_PATH" ]; then

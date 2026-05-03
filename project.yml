@@ -2,7 +2,7 @@ name: Hearsay
 options:
   bundleIdPrefix: com.swair
   deploymentTarget:
-    macOS: "13.0"
+    macOS: "14.0"
   xcodeVersion: "16.0"
   minimumXcodeGenVersion: "2.0"
 
@@ -13,6 +13,9 @@ packages:
   WhisperKit:
     url: https://github.com/argmaxinc/WhisperKit.git
     from: "0.16.0"
+  FluidAudio:
+    url: https://github.com/FluidInference/FluidAudio
+    branch: main
 
 targets:
   Hearsay:
@@ -31,15 +34,17 @@ targets:
         COMBINE_HIDPI_IMAGES: true
         CODE_SIGN_IDENTITY: "-"
         CODE_SIGN_STYLE: Manual
-        MACOSX_DEPLOYMENT_TARGET: "13.0"
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
         ENABLE_HARDENED_RUNTIME: false
-        ARCHS: "arm64 x86_64"
+        ARCHS: "arm64"
         ONLY_ACTIVE_ARCH: false
         SWIFT_ENABLE_MACROS: YES
     dependencies:
       - package: LLM.swift
         product: LLM
       - package: WhisperKit
+      - package: FluidAudio
+        product: FluidAudio
 
   HearsayTests:
     type: bundle.unit-test
