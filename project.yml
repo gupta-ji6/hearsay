@@ -2,7 +2,7 @@ name: Hearsay
 options:
   bundleIdPrefix: com.swair
   deploymentTarget:
-    macOS: "14.0"
+    macOS: "13.0"
   xcodeVersion: "16.0"
   minimumXcodeGenVersion: "2.0"
 
@@ -34,15 +34,42 @@ targets:
         COMBINE_HIDPI_IMAGES: true
         CODE_SIGN_IDENTITY: "-"
         CODE_SIGN_STYLE: Manual
-        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        MACOSX_DEPLOYMENT_TARGET: "13.0"
         ENABLE_HARDENED_RUNTIME: false
-        ARCHS: "arm64"
+        ARCHS: "arm64 x86_64"
         ONLY_ACTIVE_ARCH: false
         SWIFT_ENABLE_MACROS: YES
     dependencies:
       - package: LLM.swift
         product: LLM
       - package: WhisperKit
+    postBuildScripts:
+      - name: Copy Parakeet Helper
+        script: |
+          HELPER_SRC="${BUILT_PRODUCTS_DIR}/HearsayParakeetHelper"
+          HELPER_DST="${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/MacOS/HearsayParakeetHelper"
+          if [ -f "$HELPER_SRC" ]; then
+            mkdir -p "$(dirname "$HELPER_DST")"
+            cp "$HELPER_SRC" "$HELPER_DST"
+            chmod 755 "$HELPER_DST"
+          fi
+
+  HearsayParakeetHelper:
+    type: tool
+    platform: macOS
+    sources:
+      - HearsayParakeetHelper
+    settings:
+      base:
+        PRODUCT_NAME: HearsayParakeetHelper
+        PRODUCT_BUNDLE_IDENTIFIER: com.swair.hearsay.parakeet-helper
+        SWIFT_VERSION: "5"
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_STYLE: Manual
+        ARCHS: "arm64"
+        ONLY_ACTIVE_ARCH: false
+    dependencies:
       - package: FluidAudio
         product: FluidAudio
 

@@ -1,21 +1,32 @@
-import AVFoundation
 import Foundation
 import os.log
-
-#if canImport(FluidAudio) && arch(arm64)
-import FluidAudio
 
 actor ParakeetClient {
     static let shared = ParakeetClient()
 
-    private var asr: AsrManager?
-    private var models: AsrModels?
+    private struct HelperRequest: Codable {
+        let id: Int
+        let command: String
+        let model: String?
+        let audioPath: String?
+    }
+
+    private struct HelperResponse: Codable {
+        let id: Int
+        let ok: Bool
+        let text: String?
+        let error: String?
+    }
+
+    private var process: Process?
+    private var input: FileHandle?
+    private var output: FileHandle?
+    private var nextRequestID = 1
     private var currentModel: ParakeetModel?
-    private var warmedModels = Set<ParakeetModel>()
     private let logger = Logger(subsystem: "com.swair.hearsay", category: "parakeet")
 
     func isModelAvailable(_ model: ParakeetModel) -> Bool {
-        if currentModel == model, asr != nil {
+        if currentModel == model, process?.isRunning == true {
             return true
         }
 
@@ -28,17 +39,12 @@ actor ParakeetClient {
     }
 
     func ensureLoaded(_ model: ParakeetModel, progress: @escaping (Progress) -> Void = { _ in }) async throws {
-        if currentModel == model, asr != nil {
+        if currentModel == model, process?.isRunning == true {
             return
         }
 
-        if currentModel != model {
-            asr = nil
-            models = nil
-        }
-
         let startedAt = Date()
-        logger.notice("Starting Parakeet load variant=\(model.identifier)")
+        logger.notice("Starting Parakeet helper load variant=\(model.identifier)")
 
         let loadProgress = Progress(totalUnitCount: 100)
         loadProgress.completedUnitCount = 1
@@ -66,55 +72,32 @@ actor ParakeetClient {
         }
         defer { pollTask.cancel() }
 
-        let downloadedModels = try await AsrModels.downloadAndLoad(version: model.asrVersion)
-        self.models = downloadedModels
-
-        let manager = AsrManager(config: .init())
-        try await manager.loadModels(downloadedModels)
-        self.asr = manager
-        self.currentModel = model
+        _ = try await send(command: "load", model: model)
+        currentModel = model
 
         loadProgress.completedUnitCount = 100
         progress(loadProgress)
-        logger.notice("Parakeet load completed in \(String(format: "%.2f", Date().timeIntervalSince(startedAt)))s")
+        logger.notice("Parakeet helper load completed in \(String(format: "%.2f", Date().timeIntervalSince(startedAt)))s")
     }
 
     func prewarm(_ model: ParakeetModel) async throws {
         try await ensureLoaded(model)
-        guard !warmedModels.contains(model), let asr else {
-            return
-        }
-
         let startedAt = Date()
-        logger.notice("Starting Parakeet inference prewarm variant=\(model.identifier)")
-
-        do {
-            let warmupURL = try Self.makeWarmupAudioFile()
-            defer { try? FileManager.default.removeItem(at: warmupURL) }
-
-            var decoderState = try TdtDecoderState(decoderLayers: await asr.decoderLayerCount)
-            _ = try await asr.transcribe(warmupURL, decoderState: &decoderState)
-        } catch {
-            // Silence may legitimately produce no text; the important part is that Core ML
-            // has had a chance to compile and run the graph before the user's first utterance.
-            logger.debug("Parakeet prewarm completed with ignored error: \(error.localizedDescription)")
-        }
-
-        warmedModels.insert(model)
-        logger.notice("Parakeet inference prewarm finished in \(String(format: "%.2f", Date().timeIntervalSince(startedAt)))s")
+        logger.notice("Starting Parakeet helper prewarm variant=\(model.identifier)")
+        _ = try await send(command: "prewarm", model: model)
+        logger.notice("Parakeet helper prewarm finished in \(String(format: "%.2f", Date().timeIntervalSince(startedAt)))s")
     }
 
     func transcribe(_ url: URL) async throws -> String {
-        guard let asr else {
+        guard let currentModel else {
             throw SpeechTranscriptionError.failed("Parakeet not initialized")
         }
 
         let startedAt = Date()
-        logger.notice("Transcribing with Parakeet file=\(url.lastPathComponent)")
-        var decoderState = try TdtDecoderState(decoderLayers: await asr.decoderLayerCount)
-        let result = try await asr.transcribe(url, decoderState: &decoderState)
-        logger.info("Parakeet transcription finished in \(String(format: "%.2f", Date().timeIntervalSince(startedAt)))s")
-        return result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        logger.notice("Transcribing with Parakeet helper file=\(url.lastPathComponent)")
+        let response = try await send(command: "transcribe", model: currentModel, audioURL: url)
+        logger.info("Parakeet helper transcription finished in \(String(format: "%.2f", Date().timeIntervalSince(startedAt)))s")
+        return (response.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     func deleteCaches(_ model: ParakeetModel) async throws {
@@ -124,12 +107,116 @@ actor ParakeetClient {
             removedAny = true
         }
 
-        if removedAny {
-            asr = nil
-            models = nil
-            if currentModel == model {
-                currentModel = nil
+        if removedAny, currentModel == model {
+            stopHelper()
+            currentModel = nil
+        }
+    }
+
+    private func send(command: String, model: ParakeetModel, audioURL: URL? = nil) async throws -> HelperResponse {
+        try ensureHelperRunning()
+        guard let input, let output else {
+            throw SpeechTranscriptionError.failed("Parakeet helper pipes are unavailable")
+        }
+
+        let requestID = nextRequestID
+        nextRequestID += 1
+
+        let request = HelperRequest(
+            id: requestID,
+            command: command,
+            model: model.rawValue,
+            audioPath: audioURL?.path
+        )
+
+        let requestData = try JSONEncoder().encode(request) + Data([0x0A])
+        let responseData = try await Task.detached {
+            try input.write(contentsOf: requestData)
+            return try Self.readLine(from: output)
+        }.value
+
+        let response = try JSONDecoder().decode(HelperResponse.self, from: responseData)
+        guard response.id == requestID else {
+            throw SpeechTranscriptionError.failed("Parakeet helper returned an out-of-order response")
+        }
+
+        guard response.ok else {
+            throw SpeechTranscriptionError.failed(response.error ?? "Parakeet helper failed")
+        }
+
+        return response
+    }
+
+    private func ensureHelperRunning() throws {
+        if process?.isRunning == true {
+            return
+        }
+
+        stopHelper()
+
+        guard let helperURL = Self.helperExecutableURL() else {
+            throw SpeechTranscriptionError.failed("Parakeet helper is not bundled for this architecture.")
+        }
+
+        let standardInput = Pipe()
+        let standardOutput = Pipe()
+        let helperProcess = Process()
+        helperProcess.executableURL = helperURL
+        helperProcess.standardInput = standardInput
+        helperProcess.standardOutput = standardOutput
+        helperProcess.standardError = FileHandle.standardError
+
+        do {
+            try helperProcess.run()
+        } catch {
+            throw SpeechTranscriptionError.failed("Unable to launch Parakeet helper: \(error.localizedDescription)")
+        }
+
+        process = helperProcess
+        input = standardInput.fileHandleForWriting
+        output = standardOutput.fileHandleForReading
+        currentModel = nil
+    }
+
+    private func stopHelper() {
+        try? input?.close()
+        if process?.isRunning == true {
+            process?.terminate()
+        }
+        process = nil
+        input = nil
+        output = nil
+    }
+
+    private static func helperExecutableURL() -> URL? {
+        #if arch(arm64)
+        if let url = Bundle.main.url(forAuxiliaryExecutable: "HearsayParakeetHelper") {
+            return url
+        }
+
+        let fallback = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/MacOS/HearsayParakeetHelper")
+        if FileManager.default.isExecutableFile(atPath: fallback.path) {
+            return fallback
+        }
+        #endif
+
+        return nil
+    }
+
+    private static func readLine(from handle: FileHandle) throws -> Data {
+        var data = Data()
+        while true {
+            let byte = handle.readData(ofLength: 1)
+            guard let value = byte.first else {
+                throw SpeechTranscriptionError.failed("Parakeet helper exited unexpectedly")
             }
+
+            if value == 0x0A {
+                return data
+            }
+
+            data.append(value)
         }
     }
 
@@ -153,62 +240,4 @@ actor ParakeetClient {
 
         return total
     }
-
-    private static func makeWarmupAudioFile() throws -> URL {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("hearsay-parakeet-warmup-\(UUID().uuidString).wav")
-
-        guard let format = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: 16_000,
-            channels: 1,
-            interleaved: false
-        ), let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 24_000) else {
-            throw SpeechTranscriptionError.failed("Unable to allocate Parakeet warmup audio")
-        }
-
-        buffer.frameLength = 24_000
-        if let samples = buffer.floatChannelData?[0] {
-            samples.initialize(repeating: 0, count: Int(buffer.frameLength))
-        }
-
-        let file = try AVAudioFile(forWriting: url, settings: format.settings)
-        try file.write(from: buffer)
-        return url
-    }
 }
-
-private extension ParakeetModel {
-    var asrVersion: AsrModelVersion {
-        switch self {
-        case .englishV2: return .v2
-        case .multilingualV3: return .v3
-        }
-    }
-}
-
-#else
-
-actor ParakeetClient {
-    static let shared = ParakeetClient()
-
-    func isModelAvailable(_ model: ParakeetModel) -> Bool {
-        false
-    }
-
-    func ensureLoaded(_ model: ParakeetModel, progress: @escaping (Progress) -> Void = { _ in }) async throws {
-        throw SpeechTranscriptionError.failed("Parakeet support is only available when FluidAudio is linked on Apple Silicon.")
-    }
-
-    func prewarm(_ model: ParakeetModel) async throws {
-        throw SpeechTranscriptionError.failed("Parakeet support is only available when FluidAudio is linked on Apple Silicon.")
-    }
-
-    func transcribe(_ url: URL) async throws -> String {
-        throw SpeechTranscriptionError.failed("Parakeet not available")
-    }
-
-    func deleteCaches(_ model: ParakeetModel) async throws {}
-}
-
-#endif

@@ -11,8 +11,8 @@ actor ParakeetTranscriber: SpeechTranscribing {
         self.client = client
     }
 
-    func prewarm() async {
-        _ = try? await client.prewarm(model)
+    func prewarm() async throws {
+        try await client.prewarm(model)
     }
 
     func transcribe(audioURL: URL) async throws -> String {

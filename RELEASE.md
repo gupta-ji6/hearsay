@@ -8,7 +8,7 @@ Update `Hearsay/Info.plist`:
 
 ## 2. Build, Sign, Notarize, and Create DMG
 
-Hearsay releases are Apple Silicon-only because the Parakeet backend depends on FluidAudio/Core ML components that do not build for `x86_64`.
+Hearsay ships as a universal app. Parakeet support is provided by an Apple Silicon-only helper so Intel Macs can continue using the non-Parakeet models.
 
 ```bash
 ./scripts/release.sh

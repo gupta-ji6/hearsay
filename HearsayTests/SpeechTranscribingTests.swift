@@ -8,9 +8,9 @@ final class SpeechTranscribingTests: XCTestCase {
         }
     }
 
-    func testDefaultPrewarmImplementationDoesNotThrow() async {
+    func testDefaultPrewarmImplementationDoesNotThrow() async throws {
         let transcriber = DummyTranscriber()
-        await transcriber.prewarm()
+        try await transcriber.prewarm()
         // No crash / throw is the behavior we need from the default extension.
         XCTAssertTrue(true)
     }

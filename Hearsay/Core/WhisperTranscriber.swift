@@ -47,8 +47,8 @@ actor WhisperTranscriber: SpeechTranscribing {
         return cleaned
     }
 
-    func prewarm() async {
-        _ = try? await loadModelIfNeeded()
+    func prewarm() async throws {
+        _ = try await loadModelIfNeeded()
     }
 
     private func loadModelIfNeeded() async throws -> WhisperKit {

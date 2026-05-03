@@ -23,9 +23,9 @@ final class Transcriber: SpeechTranscribing {
 
     /// qwen_asr runs in a subprocess per transcription. There is no persistent in-memory model
     /// to preload like WhisperKit, but we still verify binaries/model path early.
-    func prewarm() async {
+    func prewarm() async throws {
         guard FileManager.default.fileExists(atPath: modelPath) else { return }
-        _ = try? findBinary()
+        _ = try findBinary()
     }
     
     /// Transcribe an audio file and return the text

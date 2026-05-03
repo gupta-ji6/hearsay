@@ -22,6 +22,7 @@ source ~/.env 2>/dev/null || true
 APP_NAME="Hearsay"
 BUNDLE_ID="com.swair.hearsay"
 SCHEME="Hearsay"
+PARAKEET_HELPER_SCHEME="HearsayParakeetHelper"
 
 # Signing identity (adjust if different)
 SIGNING_IDENTITY="Developer ID Application: Swair Rajesh Shah (8B9YURJS4G)"
@@ -37,6 +38,7 @@ APP_PATH="$BUILD_DIR/$APP_NAME.app"
 DMG_NAME="$APP_NAME"
 DMG_PATH="dist/$DMG_NAME.dmg"
 QWEN_ASR_BINARY="$HOME/work/misc/qwen-asr/qwen_asr"
+PARAKEET_HELPER_BINARY="build/Build/Products/Release/HearsayParakeetHelper"
 
 # Parse arguments
 SKIP_NOTARIZE=false
@@ -93,6 +95,32 @@ mkdir -p dist
 echo -e "${YELLOW}Generating Xcode project...${NC}"
 xcodegen generate
 
+# Build the Apple Silicon-only Parakeet helper separately so the app archive stays universal.
+echo -e "${YELLOW}Building Parakeet helper...${NC}"
+xcodebuild -project Hearsay.xcodeproj \
+    -scheme "$PARAKEET_HELPER_SCHEME" \
+    -configuration Release \
+    -derivedDataPath build \
+    -destination 'platform=macOS,arch=arm64' \
+    -skipMacroValidation \
+    build \
+    ARCHS=arm64 \
+    ONLY_ACTIVE_ARCH=NO \
+    CODE_SIGN_IDENTITY="$SIGNING_IDENTITY" \
+    DEVELOPMENT_TEAM="$TEAM_ID" \
+    CODE_SIGN_STYLE="Manual" \
+    2>&1 | tee /tmp/hearsay-parakeet-helper-release.log | grep -E "(error:|warning:|BUILD|Build)" || true
+HELPER_STATUS=${PIPESTATUS[0]}
+if [ "$HELPER_STATUS" -ne 0 ]; then
+    echo -e "${RED}Parakeet helper build failed! Full log: /tmp/hearsay-parakeet-helper-release.log${NC}"
+    exit "$HELPER_STATUS"
+fi
+
+if [ ! -f "$PARAKEET_HELPER_BINARY" ]; then
+    echo -e "${RED}Error: Parakeet helper not found at $PARAKEET_HELPER_BINARY${NC}"
+    exit 1
+fi
+
 # Build Release
 echo -e "${YELLOW}Building Release configuration...${NC}"
 xcodebuild -project Hearsay.xcodeproj \
@@ -105,7 +133,6 @@ xcodebuild -project Hearsay.xcodeproj \
     CODE_SIGN_IDENTITY="$SIGNING_IDENTITY" \
     DEVELOPMENT_TEAM="$TEAM_ID" \
     CODE_SIGN_STYLE="Manual" \
-    ARCHS="arm64" \
     ONLY_ACTIVE_ARCH=NO \
     2>&1 | tee /tmp/hearsay-release-archive.log | grep -E "(error:|warning:|BUILD|Archive)" || true
 ARCHIVE_STATUS=${PIPESTATUS[0]}
@@ -149,11 +176,19 @@ fi
 echo -e "${YELLOW}Bundling qwen_asr binary...${NC}"
 cp "$QWEN_ASR_BINARY" "$APP_PATH/Contents/MacOS/"
 
-# Sign the bundled binary
-echo -e "${YELLOW}Signing bundled binary...${NC}"
+# Bundle Parakeet helper
+echo -e "${YELLOW}Bundling Parakeet helper...${NC}"
+cp "$PARAKEET_HELPER_BINARY" "$APP_PATH/Contents/MacOS/"
+chmod 755 "$APP_PATH/Contents/MacOS/HearsayParakeetHelper"
+
+# Sign the bundled binaries
+echo -e "${YELLOW}Signing bundled binaries...${NC}"
 codesign --force --options runtime \
     --sign "$SIGNING_IDENTITY" \
     "$APP_PATH/Contents/MacOS/qwen_asr"
+codesign --force --options runtime \
+    --sign "$SIGNING_IDENTITY" \
+    "$APP_PATH/Contents/MacOS/HearsayParakeetHelper"
 
 # Re-sign the entire app (including nested code)
 echo -e "${YELLOW}Re-signing app bundle...${NC}"

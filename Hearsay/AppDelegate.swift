@@ -402,8 +402,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         Task {
             logger.info("Prewarming speech model for faster first transcription...")
-            await transcriber.prewarm()
-            logger.info("Speech model prewarm complete")
+            do {
+                try await transcriber.prewarm()
+                logger.info("Speech model prewarm complete")
+            } catch {
+                logger.error("Speech model prewarm failed: \(error.localizedDescription)")
+            }
         }
     }
     
