@@ -34,6 +34,20 @@ Hearsay supports multiple local speech model backends:
 
 Transcribed text is automatically pasted at your cursor and copied to clipboard.
 
+## CLI
+
+Homebrew cask installs can expose the bundled `hearsay` command when the cask includes the binary stanza for the app bundle.
+
+```bash
+hearsay open
+hearsay health
+hearsay dictate --stop-on-enter
+hearsay history --limit 5
+```
+
+Apps and editor extensions can use Hearsay as a local dictation provider. See
+[Local API Integration Guide](docs/local-api-integration-guide.md).
+
 ## First Launch
 
 1. Grant **Microphone** permission when prompted
