@@ -55,6 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var recordingIndicator: RecordingIndicator!
     private var transcriber: (any SpeechTranscribing)?
     private let cleanupManager = TextCleanupManager()
+    private var localAPIServer: HearsayLocalAPIServer?
     private var historyWindowController: HistoryWindowController?
     private var onboardingWindowController: OnboardingWindowController?
     private var settingsWindowController: SettingsWindowController?
@@ -70,10 +71,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - State
     
     private var isRecording = false
+    private var isTranscribing = false
     private var currentModelIdentifier: String?
     private var indicatorDismissWorkItem: DispatchWorkItem?
     private var currentDismissID: UUID?
     private var currentTranscriptionID: UUID?
+    private var activeDictationMode: DictationMode = .pasteAtCursor
+    private var activeCallerRequest: DictationRequest?
     private var recentRecorderStopFailures = 0
     private var lastRecorderStopFailureAt: Date?
     private var didAutoRelaunchForRecorderFailure = false
@@ -97,6 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupAudioRecorder()
         setupMicrophoneManager()
         setupHotkeyMonitor()
+        setupLocalAPI()
         
         // Check if we need to show onboarding (permissions or model missing)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
@@ -106,6 +111,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     
     func applicationWillTerminate(_ notification: Notification) {
         hotkeyMonitor?.stop()
+        localAPIServer?.stop()
         indicatorDismissWorkItem?.cancel()
         cleanupManager.shutdown()
     }
@@ -133,6 +139,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         try? fm.createDirectory(at: Constants.historyDirectory, withIntermediateDirectories: true)
         try? fm.createDirectory(at: Constants.figuresDirectory, withIntermediateDirectories: true)
         try? fm.createDirectory(at: Constants.fluidAudioCacheDirectory, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: Constants.appSupportDirectory, withIntermediateDirectories: true)
     }
 
     /// Keep FluidAudio/Parakeet caches under Hearsay's Application Support folder.
@@ -272,6 +279,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.recordingIndicator.figureCount = count
             // Resize window to fit new indicator width
             self.recordingWindow.positionOnScreen(width: self.recordingIndicator.idealWidth)
+        }
+    }
+
+    private func setupLocalAPI() {
+        let server = HearsayLocalAPIServer(delegate: self)
+        do {
+            try server.start()
+            localAPIServer = server
+        } catch {
+            logger.error("Failed to start local API server: \(error.localizedDescription)")
         }
     }
     
@@ -433,27 +450,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Recording
     
     private func startRecording() {
-        guard !isRecording else { 
-            logger.warning("Already recording, ignoring")
-            return 
-        }
-        if transcriber == nil && !configureTranscriberIfAvailable() {
+        do {
+            try beginRecording(mode: .pasteAtCursor)
+        } catch CallerDictationError.busy(let state) {
+            logger.warning("Hearsay is \(state.rawValue), ignoring hotkey start")
+        } catch CallerDictationError.transcriberUnavailable {
             logger.error("No transcriber available!")
             showError("No model installed")
             showOnboardingForSetup()
-            return
+        } catch CallerDictationError.microphonePermissionMissing {
+            logger.error("Microphone permission not granted")
+            showError("No mic access")
+            showOnboardingForSetup()
+        } catch {
+            logger.error("Failed to start recording: \(error.localizedDescription)")
+            showError("Start failed")
+        }
+    }
+
+    private func beginRecording(mode: DictationMode) throws {
+        guard !isRecording && !isTranscribing else {
+            throw CallerDictationError.busy(state: currentDictationState)
+        }
+
+        if case .pasteAtCursor = mode, activeCallerRequest != nil {
+            throw CallerDictationError.busy(state: currentDictationState)
+        }
+
+        if transcriber == nil && !configureTranscriberIfAvailable() {
+            throw CallerDictationError.transcriberUnavailable
         }
         
         // Check microphone permission before recording
         let micStatus = PermissionsManager.checkMicrophone()
         guard micStatus == .granted else {
             logger.error("Microphone permission not granted: \(String(describing: micStatus))")
-            showError("No mic access")
-            showOnboardingForSetup()
-            return
+            throw CallerDictationError.microphonePermissionMissing
         }
         
         isRecording = true
+        activeDictationMode = mode
         logger.info("=== START RECORDING ===")
         fileLogger.log("=== START RECORDING ===")
         
@@ -528,6 +564,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let audioURL = stopResult.url else {
             logger.error("audioRecorder.stop() returned nil!")
             handleRecorderStopFailure()
+            failActiveCallerDictation("Recording failed")
             return
         }
         
@@ -536,6 +573,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             logger.error("Audio was silent! Peak level: \(stopResult.peakLevel)")
             recordingIndicator.setState(.error("No audio"))
             dismissIndicatorAfterDelay(extended: true)
+            failActiveCallerDictation("No audio captured")
             return
         }
         
@@ -552,6 +590,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         recordingIndicator.setState(.transcribing)
         let transcriptionID = UUID()
         currentTranscriptionID = transcriptionID
+        isTranscribing = true
+        if let requestId = activeCallerRequest?.id {
+            localAPIServer?.publishState(requestId: requestId, state: .transcribing)
+        }
         
         logger.info("Starting transcription with ID: \(transcriptionID.uuidString)")
         
@@ -572,6 +614,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 logger.info("Transcription \(transcriptionID.uuidString.prefix(8)): showing error and scheduling dismiss")
                 self.recordingIndicator.setState(.error("No model"))
                 self.dismissIndicatorAfterDelay()
+                self.failActiveCallerDictation("No transcription model is available")
             }
             return
         }
@@ -676,23 +719,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             
             await MainActor.run {
                 logger.info("Transcription \(transcriptionID.uuidString.prefix(8)): SUCCESS, checking if stale...")
-                
-                // Insert text based on clipboard/paste preferences
-                let copyEnabled = UserDefaults.standard.object(forKey: "copyToClipboard") == nil
-                    ? true
-                    : UserDefaults.standard.bool(forKey: "copyToClipboard")
-                let pasteEnabled = UserDefaults.standard.object(forKey: "autoPasteAtCursor") == nil
-                    ? true
-                    : UserDefaults.standard.bool(forKey: "autoPasteAtCursor")
-
-                if copyEnabled && pasteEnabled {
-                    TextInserter.insert(finalText)
-                } else if copyEnabled {
-                    TextInserter.copyToClipboard(finalText)
-                } else if pasteEnabled {
-                    TextInserter.insertWithoutClipboard(finalText)
+                guard self.currentTranscriptionID == transcriptionID else {
+                    logger.info("Transcription \(transcriptionID.uuidString.prefix(8)): STALE (current: \(self.currentTranscriptionID?.uuidString ?? "nil")), skipping delivery")
+                    return
                 }
-                SoundPlayer.shared.play(.paste)
+
+                switch self.activeDictationMode {
+                case .pasteAtCursor:
+                    self.deliverTranscriptToFocusedApp(finalText)
+                case .returnToCaller(let requestId):
+                    self.localAPIServer?.publishResult(
+                        .completed(requestId: requestId, text: finalText, durationSeconds: audioDuration)
+                    )
+                    SoundPlayer.shared.play(.paste)
+                }
                 
                 // In dev mode, preserve the audio recording
                 var savedAudioPath: String? = nil
@@ -702,11 +742,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 
                 // Save to history
                 HistoryStore.shared.add(text: finalText, durationSeconds: audioDuration, audioFilePath: savedAudioPath)
-                
-                guard self.currentTranscriptionID == transcriptionID else {
-                    logger.info("Transcription \(transcriptionID.uuidString.prefix(8)): STALE (current: \(self.currentTranscriptionID?.uuidString ?? "nil")), skipping UI update")
-                    return
-                }
+
+                self.clearActiveDictationSession()
                 
                 // Show success
                 logger.info("Transcription \(transcriptionID.uuidString.prefix(8)): showing done and scheduling dismiss")
@@ -728,12 +765,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 logger.info("Transcription \(transcriptionID.uuidString.prefix(8)): showing error and scheduling dismiss")
                 self.recordingIndicator.setState(.error("Failed"))
                 self.scheduleIndicatorDismiss(after: 2.0)
+                self.failActiveCallerDictation(error.localizedDescription)
             }
             logger.error("Transcription error: \(error.localizedDescription)")
         }
         
         // Clean up temp file
         try? FileManager.default.removeItem(at: audioURL)
+    }
+
+    private var currentDictationState: DictationState {
+        if isRecording {
+            return .recording
+        }
+        if isTranscribing {
+            return .transcribing
+        }
+        if transcriber == nil && !configureTranscriberIfAvailable() {
+            return .unavailable
+        }
+        return .idle
+    }
+
+    private func deliverTranscriptToFocusedApp(_ finalText: String) {
+        // Insert text based on clipboard/paste preferences
+        let copyEnabled = UserDefaults.standard.object(forKey: "copyToClipboard") == nil
+            ? true
+            : UserDefaults.standard.bool(forKey: "copyToClipboard")
+        let pasteEnabled = UserDefaults.standard.object(forKey: "autoPasteAtCursor") == nil
+            ? true
+            : UserDefaults.standard.bool(forKey: "autoPasteAtCursor")
+
+        if copyEnabled && pasteEnabled {
+            TextInserter.insert(finalText)
+        } else if copyEnabled {
+            TextInserter.copyToClipboard(finalText)
+        } else if pasteEnabled {
+            TextInserter.insertWithoutClipboard(finalText)
+        }
+        SoundPlayer.shared.play(.paste)
+    }
+
+    private func failActiveCallerDictation(_ message: String) {
+        if let requestId = activeCallerRequest?.id {
+            localAPIServer?.publishError(requestId: requestId, message: message)
+        }
+        clearActiveDictationSession()
+    }
+
+    private func clearActiveDictationSession() {
+        isTranscribing = false
+        currentTranscriptionID = nil
+        activeCallerRequest = nil
+        activeDictationMode = .pasteAtCursor
     }
     
     private func getAudioDuration(url: URL) -> Double {
@@ -996,5 +1080,70 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     
     private func showModels() {
         ensureSettingsWindowController().show(tab: .models)
+    }
+}
+
+// MARK: - Local API
+
+extension AppDelegate: HearsayLocalAPIServerDelegate {
+    @MainActor
+    func localAPIState() -> DictationState {
+        currentDictationState
+    }
+
+    @MainActor
+    func startCallerDictation(request: DictationRequest) throws {
+        guard activeCallerRequest == nil else {
+            throw CallerDictationError.busy(state: currentDictationState)
+        }
+
+        activeCallerRequest = request
+        do {
+            try beginRecording(mode: request.mode)
+            localAPIServer?.publishState(requestId: request.id, state: .recording)
+            logger.info("Started caller dictation \(request.id.uuidString) for \(request.caller)")
+        } catch {
+            clearActiveDictationSession()
+            throw error
+        }
+    }
+
+    @MainActor
+    func stopCallerDictation(requestId: UUID) throws {
+        guard activeCallerRequest?.id == requestId else {
+            throw CallerDictationError.notFound
+        }
+
+        guard isRecording else {
+            throw CallerDictationError.busy(state: currentDictationState)
+        }
+
+        stopRecording()
+    }
+
+    @MainActor
+    func cancelCallerDictation(requestId: UUID) throws {
+        guard activeCallerRequest?.id == requestId else {
+            throw CallerDictationError.notFound
+        }
+
+        if isRecording {
+            isRecording = false
+            statusBar.showRecordingState(false)
+            _ = audioRecorder.stop()
+            _ = ScreenshotManager.shared.endSession()
+            hotkeyMonitor.disableScreenshotHotKey()
+            recordingIndicator.showFigureCount = false
+        }
+
+        if isTranscribing {
+            currentTranscriptionID = nil
+        }
+
+        localAPIServer?.publishResult(.cancelled(requestId: requestId))
+        clearActiveDictationSession()
+        recordingIndicator.setState(.error("Cancelled"))
+        dismissIndicatorAfterDelay()
+        logger.info("Cancelled caller dictation \(requestId.uuidString)")
     }
 }

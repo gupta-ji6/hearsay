@@ -44,6 +44,15 @@ enum Constants {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         return appSupport.appendingPathComponent("Hearsay/Recordings", isDirectory: true)
     }
+
+    static var appSupportDirectory: URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        return appSupport.appendingPathComponent("Hearsay", isDirectory: true)
+    }
+
+    static var localAPIInfoURL: URL {
+        appSupportDirectory.appendingPathComponent("local-api.json")
+    }
     
     static var tempAudioURL: URL {
         FileManager.default.temporaryDirectory.appendingPathComponent("hearsay_recording.wav")
