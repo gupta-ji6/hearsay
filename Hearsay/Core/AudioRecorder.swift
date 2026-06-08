@@ -9,6 +9,7 @@ final class AudioRecorder {
 
     enum State {
         case idle
+        case starting
         case recording
         case error(String)
     }
@@ -37,6 +38,18 @@ final class AudioRecorder {
     /// Incremented on each start/stop cycle to cancel stale in-flight setups.
     private var generation: UInt64 = 0
 
+    /// Small debounce before touching AVAudioEngine/CoreAudio. This lets very short
+    /// press/release cycles cancel before we enter synchronous CoreAudio format
+    /// negotiation, which can wedge during Bluetooth route churn.
+    private let startSetupDebounce: TimeInterval = 0.15
+
+    /// Engines cancelled while AVFAudio is still initializing are retained instead
+    /// of being deallocated immediately. On current macOS builds, tearing down a
+    /// half-built AVAudioEngine can block forever inside AVAudioIOUnit's serial
+    /// queue during Bluetooth route churn.
+    private static var quarantinedEngines: [AVAudioEngine] = []
+    private static let quarantinedEnginesLock = NSLock()
+
     init() {}
 
     deinit {
@@ -48,8 +61,8 @@ final class AudioRecorder {
     func start() {
         // Allow starting from .idle or .error (so we can recover from previous failures)
         switch state {
-        case .recording:
-            print("AudioRecorder: Already recording, ignoring start()")
+        case .starting, .recording:
+            print("AudioRecorder: Already starting/recording, ignoring start()")
             return
         case .error(let prev):
             print("AudioRecorder: Recovering from previous error: \(prev)")
@@ -72,11 +85,19 @@ final class AudioRecorder {
         // Engine setup happens on a background queue to avoid deadlocking
         // the main thread when CoreAudio's internal queues are busy
         // (e.g. during USB/Bluetooth device connect/disconnect).
-        state = .recording
+        state = .starting
         generation += 1
         let currentGen = generation
 
         audioQueue.async { [self] in
+            // Give quick press/release cycles a chance to cancel before entering
+            // AVAudioEngine/CoreAudio calls that cannot be cancelled once in flight.
+            Thread.sleep(forTimeInterval: startSetupDebounce)
+            guard currentGen == generation else {
+                print("AudioRecorder: Setup cancelled during startup debounce")
+                return
+            }
+
             var lastError: Error?
             var forceDefaultInputOnNextAttempt = false
 
@@ -87,34 +108,42 @@ final class AudioRecorder {
                     return
                 }
 
+                var engineForCleanup: AVAudioEngine?
+
                 do {
                     print("AudioRecorder: Setting up audio engine... (attempt \(attempt), forceDefaultInput=\(forceDefaultInputOnNextAttempt))")
                     let (engine, file) = try buildAudioEngine(forceDefaultInput: forceDefaultInputOnNextAttempt)
+                    engineForCleanup = engine
 
                     guard currentGen == generation else {
                         print("AudioRecorder: Setup cancelled after build (generation mismatch)")
-                        engine.stop()
+                        quarantineEngine(engine, reason: "cancelled after build")
                         return
                     }
 
                     print("AudioRecorder: Starting audio engine...")
                     try engine.start()
+                    engineForCleanup = nil
 
                     DispatchQueue.main.async { [self] in
                         guard currentGen == self.generation else {
                             print("AudioRecorder: Setup cancelled after start (generation mismatch)")
                             engine.stop()
-                            engine.inputNode.removeTap(onBus: 0)
+                            self.quarantineEngine(engine, reason: "cancelled after start")
                             return
                         }
                         self.audioEngine = engine
                         self.audioFile = file
+                        self.state = .recording
                         self.startLevelMonitoring()
                         print("AudioRecorder: Started recording to \(Constants.tempAudioURL.path)")
                     }
                     return // success
 
                 } catch {
+                    if let engineForCleanup {
+                        quarantineEngine(engineForCleanup, reason: "setup/start failed")
+                    }
                     lastError = error
                     print("AudioRecorder: Attempt \(attempt) failed: \(error.localizedDescription)")
 
@@ -145,9 +174,17 @@ final class AudioRecorder {
 
     /// Result of stopping recording
     struct StopResult {
+        enum Reason {
+            case completed
+            case cancelledBeforeReady
+            case notRecording
+            case errorState
+        }
+
         let url: URL?
         let wasSilent: Bool
         let peakLevel: Float
+        let reason: Reason
     }
 
     func stop() -> StopResult {
@@ -157,26 +194,44 @@ final class AudioRecorder {
         if case .error(_) = state {
             // Reset to idle so next start() doesn't need special handling
             print("AudioRecorder: stop() called in error state, resetting to idle")
-            audioEngine?.stop()
-            audioEngine?.inputNode.removeTap(onBus: 0)
+            teardownEngine(audioEngine)
             audioEngine = nil
             audioFile = nil
             state = .idle
-            return StopResult(url: nil, wasSilent: true, peakLevel: 0)
+            return StopResult(url: nil, wasSilent: true, peakLevel: 0, reason: .errorState)
         }
-        guard case .recording = state else {
-            return StopResult(url: nil, wasSilent: true, peakLevel: 0)
+
+        guard case .starting = state else {
+            if case .recording = state {
+                // Continue below.
+            } else {
+                return StopResult(url: nil, wasSilent: true, peakLevel: 0, reason: .notRecording)
+            }
+            return stopReadyRecording()
         }
+
+        // A stop before the async engine setup has published an AVAudioFile is a
+        // normal cancellation/too-short recording, not a recorder failure. The
+        // generation bump above tells the background setup to tear itself down if
+        // it completes after this point.
+        levelTimer?.invalidate()
+        levelTimer = nil
+        teardownEngine(audioEngine)
+        audioEngine = nil
+        audioFile = nil
+        state = .idle
+        print("AudioRecorder: Cancelled before engine was ready")
+        return StopResult(url: nil, wasSilent: true, peakLevel: 0, reason: .cancelledBeforeReady)
+    }
+
+    private func stopReadyRecording() -> StopResult {
 
         levelTimer?.invalidate()
         levelTimer = nil
 
         // Engine might not be set up yet if background setup is still in progress.
         // In that case audioEngine is nil — the generation bump above cancels the setup.
-        if let engine = audioEngine {
-            engine.stop()
-            engine.inputNode.removeTap(onBus: 0)
-        }
+        teardownEngine(audioEngine)
         audioEngine = nil
 
         let url = audioFile?.url
@@ -189,7 +244,21 @@ final class AudioRecorder {
 
         state = .idle
         print("AudioRecorder: Stopped recording -> \(url?.path ?? "nil"), peak=\(peakLevel), silent=\(wasSilent)")
-        return StopResult(url: url, wasSilent: wasSilent, peakLevel: peakLevel)
+        return StopResult(url: url, wasSilent: wasSilent, peakLevel: peakLevel, reason: .completed)
+    }
+
+    private func teardownEngine(_ engine: AVAudioEngine?) {
+        guard let engine else { return }
+        engine.stop()
+        engine.inputNode.removeTap(onBus: 0)
+        engine.reset()
+    }
+
+    private func quarantineEngine(_ engine: AVAudioEngine, reason: String) {
+        print("AudioRecorder: Quarantining AVAudioEngine (\(reason))")
+        Self.quarantinedEnginesLock.lock()
+        Self.quarantinedEngines.append(engine)
+        Self.quarantinedEnginesLock.unlock()
     }
 
     // MARK: - Setup
@@ -262,10 +331,11 @@ final class AudioRecorder {
         }
 
         let inputNode = engine.inputNode
-        
-        // Query the actual hardware format to log it
-        let hwFormat = inputNode.inputFormat(forBus: 0)
-        print("AudioRecorder: Hardware input format: \(hwFormat.channelCount)ch @ \(hwFormat.sampleRate)Hz")
+
+        // Do not synchronously query inputNode.inputFormat(forBus:) here. During
+        // Bluetooth route churn AVAudioIOUnit can block inside GetHWFormat; the
+        // first tap buffer already tells us the actual hardware format once the
+        // engine is running.
 
         // Target format: 16kHz mono for qwen_asr
         guard let targetFormat = AVAudioFormat(

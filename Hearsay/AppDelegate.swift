@@ -580,9 +580,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Stop recording and get audio file
         let stopResult = audioRecorder.stop()
         guard let audioURL = stopResult.url else {
-            logger.error("audioRecorder.stop() returned nil!")
-            handleRecorderStopFailure()
-            failActiveCallerDictation("Recording failed")
+            switch stopResult.reason {
+            case .cancelledBeforeReady:
+                logger.info("Recording stopped before audio engine was ready; treating as too short, not recorder failure")
+                fileLogger.log("audioRecorder.stop() cancelled before ready")
+                recordingIndicator.setState(.error("Too short"))
+                dismissIndicatorAfterDelay()
+                failActiveCallerDictation("Recording was too short")
+            case .notRecording:
+                logger.warning("audioRecorder.stop() called while recorder was not recording")
+                recordingWindow.fadeOut()
+                failActiveCallerDictation("Recording was not active")
+            case .errorState:
+                logger.error("audioRecorder.stop() returned nil from recorder error state")
+                handleRecorderStopFailure()
+                failActiveCallerDictation("Recording failed")
+            case .completed:
+                logger.error("audioRecorder.stop() completed without an audio URL")
+                handleRecorderStopFailure()
+                failActiveCallerDictation("Recording failed")
+            }
             return
         }
         
