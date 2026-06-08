@@ -23,6 +23,16 @@ final class ClipboardManager {
 
     static let shared = ClipboardManager()
 
+    /// UserDefaults key for the opt-in setting. OFF by default: copied text can
+    /// contain secrets, so capturing it (and potentially sending it to the cleanup
+    /// model) must be a conscious choice.
+    static let enabledDefaultsKey = "captureClipboardDuringDictation"
+
+    /// Whether the feature is enabled. Defaults to false when unset.
+    static var isFeatureEnabled: Bool {
+        UserDefaults.standard.bool(forKey: enabledDefaultsKey)
+    }
+
     /// Text copied during the current recording session, with timestamps.
     private(set) var currentSessionClips: [CapturedClip] = []
 
@@ -33,6 +43,9 @@ final class ClipboardManager {
     private var lastChangeCount: Int = 0
 
     private var pollTimer: Timer?
+
+    /// Whether a capture session is currently running.
+    private var isSessionActive = false
 
     /// How often to check the clipboard for changes while recording.
     private let pollInterval: TimeInterval = 0.25
@@ -50,6 +63,7 @@ final class ClipboardManager {
         currentSessionClips.removeAll()
         sessionStartTime = Date()
         lastChangeCount = NSPasteboard.general.changeCount
+        isSessionActive = true
 
         pollTimer?.invalidate()
         pollTimer = Timer.scheduledTimer(withTimeInterval: pollInterval, repeats: true) { [weak self] _ in
@@ -58,12 +72,19 @@ final class ClipboardManager {
         clipboardLogger.info("Clipboard session started (baseline changeCount=\(self.lastChangeCount))")
     }
 
-    /// Stop watching and return the clips captured during the session.
+    /// Stop watching and return the clips captured during the session. Returns an
+    /// empty array (and leaves no stale state) if no session was started — e.g.
+    /// when the feature is disabled.
     func endSession() -> [CapturedClip] {
         pollTimer?.invalidate()
         pollTimer = nil
-        let clips = currentSessionClips
         sessionStartTime = nil
+
+        guard isSessionActive else { return [] }
+        isSessionActive = false
+
+        let clips = currentSessionClips
+        currentSessionClips.removeAll()
         clipboardLogger.info("Clipboard session ended with \(clips.count) clip(s)")
         return clips
     }

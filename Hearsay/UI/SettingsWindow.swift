@@ -193,6 +193,7 @@ private class SettingsTabView: NSView {
     private let generalBox = NSBox()
     private let copyToClipboardCheckbox = NSButton(checkboxWithTitle: "Copy to Clipboard", target: nil, action: nil)
     private let autoPasteCheckbox = NSButton(checkboxWithTitle: "Auto-Paste at Cursor", target: nil, action: nil)
+    private let captureClipboardCheckbox = NSButton(checkboxWithTitle: "Capture Clipboard During Dictation", target: nil, action: nil)
     private let dockIconCheckbox = NSButton(checkboxWithTitle: "Show Dock Icon", target: nil, action: nil)
     private let soundEffectsCheckbox = NSButton(checkboxWithTitle: "Sound Effects", target: nil, action: nil)
     private let maxHistoryLabel = NSTextField(labelWithString: "Max History Size")
@@ -249,6 +250,11 @@ private class SettingsTabView: NSView {
         autoPasteCheckbox.target = self
         autoPasteCheckbox.action = #selector(autoPasteChanged(_:))
         generalBox.contentView?.addSubview(autoPasteCheckbox)
+
+        captureClipboardCheckbox.target = self
+        captureClipboardCheckbox.action = #selector(captureClipboardChanged(_:))
+        captureClipboardCheckbox.toolTip = "When on, text you copy (⌘C) while recording is inserted into the transcript at that point. Off by default so copied secrets aren't captured or sent to the cleanup model."
+        generalBox.contentView?.addSubview(captureClipboardCheckbox)
 
         dockIconCheckbox.target = self
         dockIconCheckbox.action = #selector(dockIconChanged(_:))
@@ -368,6 +374,7 @@ private class SettingsTabView: NSView {
             ? true
             : UserDefaults.standard.bool(forKey: "autoPasteAtCursor")
         autoPasteCheckbox.state = autoPasteEnabled ? .on : .off
+        captureClipboardCheckbox.state = ClipboardManager.isFeatureEnabled ? .on : .off
         dockIconCheckbox.state = UserDefaults.standard.bool(forKey: "showDockIcon") ? .on : .off
         soundEffectsCheckbox.state = SoundPlayer.shared.isEnabled ? .on : .off
         
@@ -421,7 +428,7 @@ private class SettingsTabView: NSView {
         y -= 28
         
         // General box
-        let generalH: CGFloat = 156
+        let generalH: CGFloat = 178
         generalBox.frame = NSRect(x: pad, y: y - generalH, width: boxW, height: generalH)
         if let cv = generalBox.contentView {
             let inset: CGFloat = 12
@@ -429,10 +436,11 @@ private class SettingsTabView: NSView {
 
             copyToClipboardCheckbox.frame = NSRect(x: inset, y: cv.bounds.height - 28, width: 200, height: 20)
             autoPasteCheckbox.frame = NSRect(x: inset, y: cv.bounds.height - 50, width: 200, height: 20)
-            soundEffectsCheckbox.frame = NSRect(x: inset, y: cv.bounds.height - 72, width: 200, height: 20)
-            dockIconCheckbox.frame = NSRect(x: inset, y: cv.bounds.height - 94, width: 200, height: 20)
+            captureClipboardCheckbox.frame = NSRect(x: inset, y: cv.bounds.height - 72, width: 300, height: 20)
+            soundEffectsCheckbox.frame = NSRect(x: inset, y: cv.bounds.height - 94, width: 200, height: 20)
+            dockIconCheckbox.frame = NSRect(x: inset, y: cv.bounds.height - 116, width: 200, height: 20)
 
-            let historyRowY = cv.bounds.height - 116
+            let historyRowY = cv.bounds.height - 138
             maxHistoryLabel.frame = NSRect(x: inset, y: historyRowY, width: 120, height: 18)
             maxHistoryValueLabel.sizeToFit()
             let valueLabelW = max(130, maxHistoryValueLabel.frame.width)
@@ -482,6 +490,10 @@ private class SettingsTabView: NSView {
 
     @objc private func autoPasteChanged(_ sender: NSButton) {
         UserDefaults.standard.set(sender.state == .on, forKey: "autoPasteAtCursor")
+    }
+
+    @objc private func captureClipboardChanged(_ sender: NSButton) {
+        UserDefaults.standard.set(sender.state == .on, forKey: ClipboardManager.enabledDefaultsKey)
     }
 
     @objc private func soundEffectsChanged(_ sender: NSButton) {
@@ -541,6 +553,7 @@ private class SettingsTabView: NSView {
     @objc private func resetToDefaults(_ sender: NSButton) {
         UserDefaults.standard.set(true, forKey: "copyToClipboard")
         UserDefaults.standard.set(true, forKey: "autoPasteAtCursor")
+        UserDefaults.standard.set(false, forKey: ClipboardManager.enabledDefaultsKey)
         UserDefaults.standard.set(0, forKey: "activationMode")
         UserDefaults.standard.set(61, forKey: "holdKeyCode")
         UserDefaults.standard.set(49, forKey: "toggleStartKeyCode")

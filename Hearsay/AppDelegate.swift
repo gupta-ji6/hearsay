@@ -513,9 +513,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         logger.info("Invalidating transcription ID, was: \(self.currentTranscriptionID?.uuidString ?? "nil")")
         currentTranscriptionID = nil
         
-        // Start screenshot + clipboard sessions (both interleave into the transcript)
+        // Start screenshot + clipboard sessions (both interleave into the transcript).
+        // Clipboard capture is opt-in (off by default) to avoid capturing secrets.
         ScreenshotManager.shared.startSession()
-        ClipboardManager.shared.startSession()
+        let captureClipboard = ClipboardManager.isFeatureEnabled
+        if captureClipboard {
+            ClipboardManager.shared.startSession()
+        }
         hotkeyMonitor.enableScreenshotHotKey()
         
         // Recreate the panel each recording start to prevent occasional "invisible but visible=true" window state.
@@ -526,7 +530,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         recordingIndicator.figureCount = 0
         recordingIndicator.showFigureCount = true  // Always show, screenshots work in both modes
         recordingIndicator.clipCount = 0
-        recordingIndicator.showClipCount = true    // Badge appears once a copy is captured
+        recordingIndicator.showClipCount = captureClipboard  // Badge appears once a copy is captured
 
         logger.info("Setting indicator state to .recording and calling fadeIn")
         recordingIndicator.setState(.recording)
