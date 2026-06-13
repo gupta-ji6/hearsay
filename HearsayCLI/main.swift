@@ -37,10 +37,50 @@ private struct Command {
             try await control(rest, action: "cancel")
         case "history":
             try history(rest)
+        case "logs":
+            try logs(rest)
         case "help", "--help", "-h":
             printHelp()
         default:
             throw CLIError("unknown command '\(name)'", exitCode: 64)
+        }
+    }
+
+    private func logs(_ args: [String]) throws {
+        var parser = ArgumentParser(args)
+        let printPath = parser.flag("--path")
+        let openLog = parser.flag("--open")
+        let copyLog = parser.flag("--copy")
+        let clearLog = parser.flag("--clear")
+        try parser.rejectUnused()
+
+        let reader = DiagnosticLogReader()
+
+        if clearLog {
+            try reader.clear()
+            print("Diagnostic log cleared")
+            return
+        }
+
+        if printPath {
+            print(reader.logURL.path)
+            return
+        }
+
+        let snapshot = try reader.snapshotText()
+
+        if copyLog {
+            try runProcess("/usr/bin/pbcopy", [], standardInput: Data(snapshot.utf8))
+            stderr("Copied metadata-only diagnostic logs to clipboard")
+        }
+
+        if openLog {
+            let snapshotURL = try reader.writeSnapshotFile(text: snapshot)
+            try runProcess("/usr/bin/open", [snapshotURL.path])
+        }
+
+        if !copyLog && !openLog {
+            print(snapshot, terminator: snapshot.hasSuffix("\n") ? "" : "\n")
         }
     }
 
@@ -163,6 +203,7 @@ private struct Command {
           hearsay stop REQUEST_ID
           hearsay cancel REQUEST_ID
           hearsay history [--limit N] [--json]
+          hearsay logs [--open] [--copy] [--path] [--clear]
         """)
     }
 }
@@ -288,6 +329,82 @@ private struct HistoryItem: Codable {
     let audioFilePath: String?
 }
 
+private struct DiagnosticLogReader {
+    let logURL = appSupportDirectory().appendingPathComponent("debug.log")
+
+    private let maxAge: TimeInterval = 24 * 60 * 60
+    private let maxBytes = 1_000_000
+
+    func snapshotText() throws -> String {
+        let body = try prunedBody()
+        let generatedAt = Self.isoFormatter().string(from: Date())
+        return """
+        # Hearsay diagnostic log
+        # Generated: \(generatedAt)
+        # Retention: last 24 hours, capped at 1000000 bytes
+        # Privacy: metadata only; raw transcripts, audio, clipboard text, screenshots, and prompts are not recorded
+
+        \(body)
+        """
+    }
+
+    func writeSnapshotFile(text: String) throws -> URL {
+        let timestamp = Self.isoFormatter()
+            .string(from: Date())
+            .replacingOccurrences(of: ":", with: "-")
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Hearsay-Diagnostics-\(timestamp).log")
+        try text.write(to: url, atomically: true, encoding: .utf8)
+        return url
+    }
+
+    func clear() throws {
+        if FileManager.default.fileExists(atPath: logURL.path) {
+            try FileManager.default.removeItem(at: logURL)
+        }
+    }
+
+    private func prunedBody() throws -> String {
+        guard FileManager.default.fileExists(atPath: logURL.path) else {
+            return ""
+        }
+
+        let raw = try String(contentsOf: logURL, encoding: .utf8)
+        let cutoff = Date().addingTimeInterval(-maxAge)
+        let formatter = Self.isoFormatter()
+
+        var lines: [String] = []
+        for line in raw.split(separator: "\n", omittingEmptySubsequences: true).map(String.init) {
+            guard
+                let data = line.data(using: .utf8),
+                let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                let timestamp = object["timestamp"] as? String,
+                let date = formatter.date(from: timestamp),
+                date >= cutoff
+            else {
+                continue
+            }
+            lines.append(line)
+        }
+
+        while byteCount(for: lines) > maxBytes, !lines.isEmpty {
+            lines.removeFirst()
+        }
+
+        return lines.isEmpty ? "" : lines.joined(separator: "\n") + "\n"
+    }
+
+    private func byteCount(for lines: [String]) -> Int {
+        lines.reduce(0) { $0 + $1.utf8.count + 1 }
+    }
+
+    private static func isoFormatter() -> ISO8601DateFormatter {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }
+}
+
 private struct ArgumentParser {
     private var args: [String]
     private var used: Set<Int> = []
@@ -371,10 +488,25 @@ private func stderr(_ message: String) {
 }
 
 private func runProcess(_ executable: String, _ arguments: [String]) throws {
+    try runProcess(executable, arguments, standardInput: nil)
+}
+
+private func runProcess(_ executable: String, _ arguments: [String], standardInput: Data?) throws {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: executable)
     process.arguments = arguments
+    let inputPipe: Pipe?
+    if standardInput != nil {
+        inputPipe = Pipe()
+        process.standardInput = inputPipe
+    } else {
+        inputPipe = nil
+    }
     try process.run()
+    if let standardInput, let inputPipe {
+        inputPipe.fileHandleForWriting.write(standardInput)
+        try? inputPipe.fileHandleForWriting.close()
+    }
     process.waitUntilExit()
     guard process.terminationStatus == 0 else {
         throw CLIError("\(URL(fileURLWithPath: executable).lastPathComponent) exited with \(process.terminationStatus)")

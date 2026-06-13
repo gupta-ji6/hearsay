@@ -43,6 +43,8 @@ hearsay open
 hearsay health
 hearsay dictate --stop-on-enter
 hearsay history --limit 5
+hearsay logs
+hearsay logs --open
 ```
 
 Apps and editor extensions can use Hearsay as a local dictation provider. See
