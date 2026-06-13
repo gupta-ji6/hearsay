@@ -118,7 +118,7 @@ final class HistoryStore {
         trimToMax()
         
         saveIndex()
-        historyLogger.info("Added transcription: \(item.text.prefix(30))...")
+        historyLogger.info("Added transcription history item; length=\(item.text.count), duration=\(item.durationSeconds)")
         
         DispatchQueue.main.async {
             self.onHistoryChanged?()

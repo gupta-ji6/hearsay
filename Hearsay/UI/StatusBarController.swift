@@ -18,6 +18,11 @@ final class StatusBarController {
     var onShowPermissions: (() -> Void)?
     var onShowOnboarding: (() -> Void)?
     var onCheckForUpdates: (() -> Void)?
+    var onOpenDiagnosticLog: (() -> Void)?
+    var onCopyDiagnosticLogs: (() -> Void)?
+    var onEmailDiagnosticLogs: (() -> Void)?
+    var onRevealDiagnosticLog: (() -> Void)?
+    var onClearDiagnosticLogs: (() -> Void)?
     var onCopyHistoryItem: ((TranscriptionItem) -> Void)?
     var onQuit: (() -> Void)?
     
@@ -119,6 +124,39 @@ final class StatusBarController {
         updateItem.target = self
         updateItem.isEnabled = true
         menu.addItem(updateItem)
+
+        let diagnosticsItem = NSMenuItem(title: "Diagnostics", action: nil, keyEquivalent: "")
+        let diagnosticsMenu = NSMenu()
+
+        let openLogItem = NSMenuItem(title: "Open Diagnostic Log", action: #selector(openDiagnosticLog(_:)), keyEquivalent: "")
+        openLogItem.target = self
+        openLogItem.isEnabled = true
+        diagnosticsMenu.addItem(openLogItem)
+
+        let copyLogsItem = NSMenuItem(title: "Copy Diagnostic Logs", action: #selector(copyDiagnosticLogs(_:)), keyEquivalent: "")
+        copyLogsItem.target = self
+        copyLogsItem.isEnabled = true
+        diagnosticsMenu.addItem(copyLogsItem)
+
+        let emailLogsItem = NSMenuItem(title: "Send Diagnostic Logs…", action: #selector(emailDiagnosticLogs(_:)), keyEquivalent: "")
+        emailLogsItem.target = self
+        emailLogsItem.isEnabled = true
+        diagnosticsMenu.addItem(emailLogsItem)
+
+        let revealLogItem = NSMenuItem(title: "Reveal Diagnostic Log", action: #selector(revealDiagnosticLog(_:)), keyEquivalent: "")
+        revealLogItem.target = self
+        revealLogItem.isEnabled = true
+        diagnosticsMenu.addItem(revealLogItem)
+
+        diagnosticsMenu.addItem(.separator())
+
+        let clearLogsItem = NSMenuItem(title: "Clear Diagnostic Logs", action: #selector(clearDiagnosticLogs(_:)), keyEquivalent: "")
+        clearLogsItem.target = self
+        clearLogsItem.isEnabled = true
+        diagnosticsMenu.addItem(clearLogsItem)
+
+        diagnosticsItem.submenu = diagnosticsMenu
+        menu.addItem(diagnosticsItem)
         
         menu.addItem(.separator())
         
@@ -231,6 +269,26 @@ final class StatusBarController {
     
     @objc private func checkForUpdates(_ sender: NSMenuItem) {
         onCheckForUpdates?()
+    }
+
+    @objc private func openDiagnosticLog(_ sender: NSMenuItem) {
+        onOpenDiagnosticLog?()
+    }
+
+    @objc private func copyDiagnosticLogs(_ sender: NSMenuItem) {
+        onCopyDiagnosticLogs?()
+    }
+
+    @objc private func emailDiagnosticLogs(_ sender: NSMenuItem) {
+        onEmailDiagnosticLogs?()
+    }
+
+    @objc private func revealDiagnosticLog(_ sender: NSMenuItem) {
+        onRevealDiagnosticLog?()
+    }
+
+    @objc private func clearDiagnosticLogs(_ sender: NSMenuItem) {
+        onClearDiagnosticLogs?()
     }
     
     @objc private func showHelp(_ sender: NSMenuItem) {

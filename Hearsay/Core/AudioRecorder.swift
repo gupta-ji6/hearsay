@@ -42,6 +42,19 @@ final class AudioRecorder {
     /// press/release cycles cancel before we enter synchronous CoreAudio format
     /// negotiation, which can wedge during Bluetooth route churn.
     private let startSetupDebounce: TimeInterval = 0.15
+    private let startupTimeout: TimeInterval = 5.0
+
+    private struct AudioStartSnapshot {
+        let elapsedSeconds: Double?
+        let lastPhase: String?
+        let timedOut: Bool
+    }
+
+    private let startDiagnosticsLock = NSLock()
+    private var startDiagnosticsGeneration: UInt64?
+    private var startDiagnosticsRequestedAt: Date?
+    private var startDiagnosticsLastPhase: String?
+    private var startDiagnosticsTimedOutGeneration: UInt64?
 
     /// Engines cancelled while AVFAudio is still initializing are retained instead
     /// of being deallocated immediately. On current macOS builds, tearing down a
@@ -63,9 +76,15 @@ final class AudioRecorder {
         switch state {
         case .starting, .recording:
             print("AudioRecorder: Already starting/recording, ignoring start()")
+            DiagnosticLog.shared.event("audio.start.ignored", level: .warning, fields: [
+                "state": state.diagnosticName
+            ])
             return
         case .error(let prev):
             print("AudioRecorder: Recovering from previous error: \(prev)")
+            DiagnosticLog.shared.event("audio.start.recovering_from_error", level: .warning, fields: [
+                "message_length": "\(prev.count)"
+            ])
             // Clean up any leftover engine state
             audioEngine?.stop()
             audioEngine?.inputNode.removeTap(onBus: 0)
@@ -88,13 +107,22 @@ final class AudioRecorder {
         state = .starting
         generation += 1
         let currentGen = generation
+        beginStartDiagnostics(generation: currentGen)
 
         audioQueue.async { [self] in
             // Give quick press/release cycles a chance to cancel before entering
             // AVAudioEngine/CoreAudio calls that cannot be cancelled once in flight.
+            noteStartPhase(
+                "setup_begin",
+                generation: currentGen,
+                fields: ["debounce_seconds": String(format: "%.2f", startSetupDebounce)]
+            )
             Thread.sleep(forTimeInterval: startSetupDebounce)
             guard currentGen == generation else {
                 print("AudioRecorder: Setup cancelled during startup debounce")
+                noteStartPhase("cancelled", generation: currentGen, level: .warning, fields: [
+                    "reason": "setup_debounce_cancelled"
+                ])
                 return
             }
 
@@ -112,22 +140,42 @@ final class AudioRecorder {
 
                 do {
                     print("AudioRecorder: Setting up audio engine... (attempt \(attempt), forceDefaultInput=\(forceDefaultInputOnNextAttempt))")
-                    let (engine, file) = try buildAudioEngine(forceDefaultInput: forceDefaultInputOnNextAttempt)
+                    noteStartPhase("build_engine_begin", generation: currentGen, fields: [
+                        "attempt": "\(attempt)",
+                        "force_default_input": "\(forceDefaultInputOnNextAttempt)"
+                    ])
+                    let (engine, file) = try buildAudioEngine(
+                        forceDefaultInput: forceDefaultInputOnNextAttempt,
+                        generation: currentGen,
+                        attempt: attempt
+                    )
                     engineForCleanup = engine
 
                     guard currentGen == generation else {
                         print("AudioRecorder: Setup cancelled after build (generation mismatch)")
+                        noteStartPhase("cancelled", generation: currentGen, level: .warning, fields: [
+                            "reason": "cancelled_after_build"
+                        ])
                         quarantineEngine(engine, reason: "cancelled after build")
                         return
                     }
 
                     print("AudioRecorder: Starting audio engine...")
+                    noteStartPhase("engine_start_begin", generation: currentGen, fields: [
+                        "attempt": "\(attempt)"
+                    ])
                     try engine.start()
+                    noteStartPhase("engine_start_end", generation: currentGen, fields: [
+                        "attempt": "\(attempt)"
+                    ])
                     engineForCleanup = nil
 
                     DispatchQueue.main.async { [self] in
                         guard currentGen == self.generation else {
                             print("AudioRecorder: Setup cancelled after start (generation mismatch)")
+                            self.noteStartPhase("cancelled", generation: currentGen, level: .warning, fields: [
+                                "reason": "cancelled_after_engine_start"
+                            ])
                             engine.stop()
                             self.quarantineEngine(engine, reason: "cancelled after start")
                             return
@@ -137,6 +185,7 @@ final class AudioRecorder {
                         self.state = .recording
                         self.startLevelMonitoring()
                         print("AudioRecorder: Started recording to \(Constants.tempAudioURL.path)")
+                        self.noteStartPhase("ready", generation: currentGen)
                     }
                     return // success
 
@@ -146,11 +195,18 @@ final class AudioRecorder {
                     }
                     lastError = error
                     print("AudioRecorder: Attempt \(attempt) failed: \(error.localizedDescription)")
+                    var fields = DiagnosticLog.shared.errorFields(for: error)
+                    fields["attempt"] = "\(attempt)"
+                    fields["format_mismatch"] = "\(isFormatMismatchError(error))"
+                    noteStartPhase("attempt_failed", generation: currentGen, level: .warning, fields: fields)
 
                     if isFormatMismatchError(error), !forceDefaultInputOnNextAttempt {
                         // Fallback path for aggregate/default route churn where explicit
                         // setInputDevice can trigger 96kHz↔48kHz graph mismatch (-10868).
                         print("AudioRecorder: Detected format mismatch; retrying with system default input path")
+                        noteStartPhase("retry_default_input", generation: currentGen, level: .warning, fields: [
+                            "reason": "format_mismatch"
+                        ])
                         forceDefaultInputOnNextAttempt = true
                     }
 
@@ -164,6 +220,9 @@ final class AudioRecorder {
             // All attempts failed
             let message = "Failed to start recording: \(lastError?.localizedDescription ?? "unknown error")"
             print("AudioRecorder: \(message)")
+            var fields = lastError.map { DiagnosticLog.shared.errorFields(for: $0) } ?? ["error_type": "unknown"]
+            fields["message_length"] = "\(message.count)"
+            noteStartPhase("failed", generation: currentGen, level: .error, fields: fields)
             DispatchQueue.main.async { [self] in
                 guard currentGen == self.generation else { return }
                 self.state = .error(message)
@@ -185,20 +244,56 @@ final class AudioRecorder {
         let wasSilent: Bool
         let peakLevel: Float
         let reason: Reason
+        let startupElapsedSeconds: Double?
+        let startupLastPhase: String?
+        let startupTimedOut: Bool
+
+        init(
+            url: URL?,
+            wasSilent: Bool,
+            peakLevel: Float,
+            reason: Reason,
+            startupElapsedSeconds: Double? = nil,
+            startupLastPhase: String? = nil,
+            startupTimedOut: Bool = false
+        ) {
+            self.url = url
+            self.wasSilent = wasSilent
+            self.peakLevel = peakLevel
+            self.reason = reason
+            self.startupElapsedSeconds = startupElapsedSeconds
+            self.startupLastPhase = startupLastPhase
+            self.startupTimedOut = startupTimedOut
+        }
     }
 
     func stop() -> StopResult {
         // Bump generation to cancel any in-flight background setup
+        let stoppedGeneration = generation
         generation += 1
 
         if case .error(_) = state {
             // Reset to idle so next start() doesn't need special handling
             print("AudioRecorder: stop() called in error state, resetting to idle")
+            let snapshot = startSnapshot(for: stoppedGeneration)
+            DiagnosticLog.shared.event("audio.stop.error_state", level: .error, fields: [
+                "startup_elapsed_seconds": snapshot.elapsedSeconds.map { String(format: "%.2f", $0) } ?? "unknown",
+                "startup_last_phase": snapshot.lastPhase ?? "unknown",
+                "startup_timed_out": "\(snapshot.timedOut)"
+            ])
             teardownEngine(audioEngine)
             audioEngine = nil
             audioFile = nil
             state = .idle
-            return StopResult(url: nil, wasSilent: true, peakLevel: 0, reason: .errorState)
+            return StopResult(
+                url: nil,
+                wasSilent: true,
+                peakLevel: 0,
+                reason: .errorState,
+                startupElapsedSeconds: snapshot.elapsedSeconds,
+                startupLastPhase: snapshot.lastPhase,
+                startupTimedOut: snapshot.timedOut
+            )
         }
 
         guard case .starting = state else {
@@ -221,7 +316,22 @@ final class AudioRecorder {
         audioFile = nil
         state = .idle
         print("AudioRecorder: Cancelled before engine was ready")
-        return StopResult(url: nil, wasSilent: true, peakLevel: 0, reason: .cancelledBeforeReady)
+        let snapshot = startSnapshot(for: stoppedGeneration)
+        DiagnosticLog.shared.event("audio.stop.before_ready", level: snapshot.timedOut ? .error : .warning, fields: [
+            "startup_elapsed_seconds": snapshot.elapsedSeconds.map { String(format: "%.2f", $0) } ?? "unknown",
+            "startup_last_phase": snapshot.lastPhase ?? "unknown",
+            "startup_timed_out": "\(snapshot.timedOut)",
+            "likely_reason": snapshot.timedOut ? "coreaudio_startup_stalled" : "released_before_audio_ready"
+        ])
+        return StopResult(
+            url: nil,
+            wasSilent: true,
+            peakLevel: 0,
+            reason: .cancelledBeforeReady,
+            startupElapsedSeconds: snapshot.elapsedSeconds,
+            startupLastPhase: snapshot.lastPhase,
+            startupTimedOut: snapshot.timedOut
+        )
     }
 
     private func stopReadyRecording() -> StopResult {
@@ -261,6 +371,93 @@ final class AudioRecorder {
         Self.quarantinedEnginesLock.unlock()
     }
 
+    private func beginStartDiagnostics(generation: UInt64) {
+        startDiagnosticsLock.lock()
+        startDiagnosticsGeneration = generation
+        startDiagnosticsRequestedAt = Date()
+        startDiagnosticsLastPhase = "requested"
+        startDiagnosticsTimedOutGeneration = nil
+        startDiagnosticsLock.unlock()
+
+        DiagnosticLog.shared.event("audio.start.requested", fields: [
+            "generation": "\(generation)",
+            "has_selected_device": "\(deviceUID != nil)",
+            "timeout_seconds": String(format: "%.2f", startupTimeout)
+        ])
+
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + startupTimeout) { [weak self] in
+            self?.logStartTimeoutIfNeeded(generation: generation)
+        }
+    }
+
+    private func noteStartPhase(
+        _ phase: String,
+        generation: UInt64,
+        level: DiagnosticLog.Level = .info,
+        fields: [String: String] = [:]
+    ) {
+        var elapsed: Double?
+        startDiagnosticsLock.lock()
+        if startDiagnosticsGeneration == generation {
+            startDiagnosticsLastPhase = phase
+            if let requestedAt = startDiagnosticsRequestedAt {
+                elapsed = Date().timeIntervalSince(requestedAt)
+            }
+        }
+        startDiagnosticsLock.unlock()
+
+        var eventFields = fields
+        eventFields["generation"] = "\(generation)"
+        if let elapsed {
+            eventFields["elapsed_seconds"] = String(format: "%.2f", elapsed)
+        }
+
+        DiagnosticLog.shared.event("audio.start.\(phase)", level: level, fields: eventFields)
+    }
+
+    private func logStartTimeoutIfNeeded(generation: UInt64) {
+        var fields: [String: String]?
+
+        startDiagnosticsLock.lock()
+        if startDiagnosticsGeneration == generation,
+           startDiagnosticsTimedOutGeneration != generation,
+           startDiagnosticsLastPhase != "ready",
+           case .starting = state {
+            startDiagnosticsTimedOutGeneration = generation
+            var timeoutFields: [String: String] = [
+                "generation": "\(generation)",
+                "timeout_seconds": String(format: "%.2f", startupTimeout),
+                "last_phase": startDiagnosticsLastPhase ?? "unknown",
+                "likely_reason": "coreaudio_startup_stalled"
+            ]
+            if let requestedAt = startDiagnosticsRequestedAt {
+                timeoutFields["elapsed_seconds"] = String(format: "%.2f", Date().timeIntervalSince(requestedAt))
+            }
+            fields = timeoutFields
+        }
+        startDiagnosticsLock.unlock()
+
+        if let fields {
+            DiagnosticLog.shared.event("audio.start.timeout", level: .error, fields: fields)
+        }
+    }
+
+    private func startSnapshot(for generation: UInt64) -> AudioStartSnapshot {
+        startDiagnosticsLock.lock()
+        defer { startDiagnosticsLock.unlock() }
+
+        guard startDiagnosticsGeneration == generation else {
+            return AudioStartSnapshot(elapsedSeconds: nil, lastPhase: nil, timedOut: false)
+        }
+
+        let elapsed = startDiagnosticsRequestedAt.map { Date().timeIntervalSince($0) }
+        return AudioStartSnapshot(
+            elapsedSeconds: elapsed,
+            lastPhase: startDiagnosticsLastPhase,
+            timedOut: startDiagnosticsTimedOutGeneration == generation
+        )
+    }
+
     // MARK: - Setup
 
     private func setupAudioSession() throws {
@@ -288,8 +485,11 @@ final class AudioRecorder {
     /// Called on audioQueue (background) to avoid deadlocking the main thread
     /// when CoreAudio's internal queues are busy during device changes.
     /// Returns the engine and audio file — caller is responsible for assigning to self.
-    private func buildAudioEngine(forceDefaultInput: Bool = false) throws -> (AVAudioEngine, AVAudioFile) {
+    private func buildAudioEngine(forceDefaultInput: Bool = false, generation: UInt64, attempt: Int) throws -> (AVAudioEngine, AVAudioFile) {
         let engine = AVAudioEngine()
+        noteStartPhase("build_engine_created", generation: generation, fields: [
+            "attempt": "\(attempt)"
+        ])
 
         // If a specific device is requested AND it differs from the system default,
         // configure it on the input node's AudioUnit.
@@ -300,17 +500,51 @@ final class AudioRecorder {
         var didSetNonDefaultDevice = false
         if forceDefaultInput {
             print("AudioRecorder: Using fallback mode (system default input, no explicit setInputDevice)")
-        } else if let uid = deviceUID, let targetID = Self.audioDeviceID(for: uid) {
+            noteStartPhase("using_default_input_fallback", generation: generation, fields: [
+                "attempt": "\(attempt)"
+            ])
+        } else if let uid = deviceUID {
+            noteStartPhase("resolve_input_device_begin", generation: generation, fields: [
+                "attempt": "\(attempt)"
+            ])
+            guard let targetID = Self.audioDeviceID(for: uid) else {
+                noteStartPhase("resolve_input_device_failed", generation: generation, level: .warning, fields: [
+                    "attempt": "\(attempt)"
+                ])
+                return try buildAudioEngine(forceDefaultInput: true, generation: generation, attempt: attempt)
+            }
+            noteStartPhase("resolve_input_device_end", generation: generation, fields: [
+                "attempt": "\(attempt)"
+            ])
+            noteStartPhase("default_input_query_begin", generation: generation, fields: [
+                "attempt": "\(attempt)"
+            ])
             let defaultID = Self.defaultInputDeviceID()
+            noteStartPhase("default_input_query_end", generation: generation, fields: [
+                "attempt": "\(attempt)",
+                "default_device_found": "\(defaultID != nil)",
+                "target_is_default": "\(targetID == defaultID)"
+            ])
             if targetID != defaultID {
                 do {
+                    noteStartPhase("set_input_device_begin", generation: generation, fields: [
+                        "attempt": "\(attempt)"
+                    ])
                     try setInputDevice(targetID, on: engine.inputNode)
                     print("AudioRecorder: Set engine input device to \(targetID) (default is \(defaultID ?? 0))")
+                    noteStartPhase("set_input_device_end", generation: generation, fields: [
+                        "attempt": "\(attempt)"
+                    ])
                     didSetNonDefaultDevice = true
                 } catch {
                     // Some CoreAudio failures are transient during device/routing churn.
                     // Fallback to default input instead of failing the entire recording session.
                     let nsError = error as NSError
+                    noteStartPhase("set_input_device_failed", generation: generation, level: .warning, fields: [
+                        "attempt": "\(attempt)",
+                        "error_domain": nsError.domain,
+                        "error_code": "\(nsError.code)"
+                    ])
                     if nsError.domain == NSOSStatusErrorDomain,
                        nsError.code == -10868 || nsError.code == Int(kAudioHardwareIllegalOperationError) {
                         print("AudioRecorder: setInputDevice failed with \(nsError.code), falling back to default input device")
@@ -320,14 +554,29 @@ final class AudioRecorder {
                 }
             } else {
                 print("AudioRecorder: Requested device \(targetID) is already system default, skipping explicit setInputDevice")
+                noteStartPhase("set_input_device_skipped", generation: generation, fields: [
+                    "attempt": "\(attempt)",
+                    "reason": "target_is_default"
+                ])
             }
+        } else {
+            noteStartPhase("resolve_input_device_skipped", generation: generation, fields: [
+                "attempt": "\(attempt)",
+                "has_selected_device": "\(deviceUID != nil)"
+            ])
         }
 
         // Reset the engine ONLY if we set a non-default device.
         // This forces AVAudioEngine to re-query the hardware format after device change.
         if didSetNonDefaultDevice {
+            noteStartPhase("engine_reset_begin", generation: generation, fields: [
+                "attempt": "\(attempt)"
+            ])
             engine.reset()
             print("AudioRecorder: Reset engine after setting non-default device")
+            noteStartPhase("engine_reset_end", generation: generation, fields: [
+                "attempt": "\(attempt)"
+            ])
         }
 
         let inputNode = engine.inputNode
@@ -354,6 +603,9 @@ final class AudioRecorder {
         // Remove existing file
         try? FileManager.default.removeItem(at: outputURL)
 
+        noteStartPhase("create_audio_file_begin", generation: generation, fields: [
+            "attempt": "\(attempt)"
+        ])
         let audioFile = try AVAudioFile(
             forWriting: outputURL,
             settings: [
@@ -365,6 +617,9 @@ final class AudioRecorder {
                 AVLinearPCMIsBigEndianKey: false
             ]
         )
+        noteStartPhase("create_audio_file_end", generation: generation, fields: [
+            "attempt": "\(attempt)"
+        ])
 
         // Install tap on input — pass nil for format so AVAudioEngine uses the
         // node's native format. This works correctly now that we skip setInputDevice
@@ -377,6 +632,10 @@ final class AudioRecorder {
         var cachedChannelCount: AVAudioChannelCount = 0
         var formatLoggedOnce = false
 
+        noteStartPhase("install_tap_begin", generation: generation, fields: [
+            "attempt": "\(attempt)",
+            "buffer_size": "\(bufferSize)"
+        ])
         inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: nil) { [weak self] buffer, time in
             guard let self = self else { return }
 
@@ -386,6 +645,10 @@ final class AudioRecorder {
 
             if !formatLoggedOnce {
                 print("AudioRecorder: First tap buffer format: \(bufferChannelCount)ch @ \(bufferSampleRate)Hz")
+                DiagnosticLog.shared.event("audio.first_buffer", fields: [
+                    "sample_rate": "\(Int(bufferSampleRate))",
+                    "channels": "\(bufferChannelCount)"
+                ])
                 formatLoggedOnce = true
             }
 
@@ -399,6 +662,11 @@ final class AudioRecorder {
                     cachedChannelCount = bufferChannelCount
                     if cachedConverter == nil {
                         print("AudioRecorder: WARNING - Failed to create converter from \(bufferChannelCount)ch @ \(bufferSampleRate)Hz")
+                        DiagnosticLog.shared.event("audio.converter_create_failed", level: .warning, fields: [
+                            "source_sample_rate": "\(Int(bufferSampleRate))",
+                            "source_channels": "\(bufferChannelCount)",
+                            "target_sample_rate": "\(Int(Constants.sampleRate))"
+                        ])
                     }
                 }
 
@@ -423,6 +691,7 @@ final class AudioRecorder {
                     try? audioFile.write(from: convertedBuffer)
                 } else if let error = error {
                     print("AudioRecorder: Conversion error: \(error.localizedDescription)")
+                    DiagnosticLog.shared.event("audio.conversion_failed", level: .warning, fields: DiagnosticLog.shared.errorFields(for: error))
                 }
             } else {
                 // Format already matches target
@@ -430,6 +699,9 @@ final class AudioRecorder {
                 try? audioFile.write(from: buffer)
             }
         }
+        noteStartPhase("install_tap_end", generation: generation, fields: [
+            "attempt": "\(attempt)"
+        ])
 
         return (engine, audioFile)
     }
@@ -597,5 +869,20 @@ final class AudioRecorder {
 
     static func requestMicrophonePermission() async -> Bool {
         await AVCaptureDevice.requestAccess(for: .audio)
+    }
+}
+
+private extension AudioRecorder.State {
+    var diagnosticName: String {
+        switch self {
+        case .idle:
+            return "idle"
+        case .starting:
+            return "starting"
+        case .recording:
+            return "recording"
+        case .error:
+            return "error"
+        }
     }
 }

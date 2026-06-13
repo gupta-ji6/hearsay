@@ -75,7 +75,7 @@ final class Transcriber: SpeechTranscribing {
                         return
                     }
                     
-                    print("Transcriber: Success - \"\(output)\"")
+                    print("Transcriber: Success - output length \(output.count)")
                     continuation.resume(returning: output)
                 }
             } catch {

@@ -50,6 +50,10 @@ enum Constants {
         return appSupport.appendingPathComponent("Hearsay", isDirectory: true)
     }
 
+    static var diagnosticLogURL: URL {
+        appSupportDirectory.appendingPathComponent("debug.log")
+    }
+
     static var localAPIInfoURL: URL {
         appSupportDirectory.appendingPathComponent("local-api.json")
     }

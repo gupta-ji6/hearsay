@@ -3,25 +3,6 @@ import os.log
 
 private let logger = Logger(subsystem: "com.swair.hearsay", category: "window")
 
-// File logger for debugging - writes to ~/Library/Application Support/Hearsay/debug.log
-private func fileLog(_ message: String) {
-    let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-    let logURL = appSupport.appendingPathComponent("Hearsay/debug.log")
-    let timestamp = ISO8601DateFormatter().string(from: Date())
-    let entry = "[\(timestamp)] [RecordingWindow] \(message)\n"
-    if let data = entry.data(using: .utf8) {
-        if FileManager.default.fileExists(atPath: logURL.path) {
-            if let handle = try? FileHandle(forWritingTo: logURL) {
-                handle.seekToEndOfFile()
-                handle.write(data)
-                try? handle.close()
-            }
-        } else {
-            try? data.write(to: logURL)
-        }
-    }
-}
-
 /// Floating borderless window that displays the recording indicator.
 /// Appears near the bottom center of the active screen.
 final class RecordingWindow: NSPanel {
@@ -88,7 +69,14 @@ final class RecordingWindow: NSPanel {
         // Detailed logging for debugging pill visibility issues
         let screenInfo = NSScreen.screens.enumerated().map { "screen\($0.offset):\($0.element.frame)" }.joined(separator: ", ")
         let contentInfo = "contentView=\(contentView != nil), hidden=\(contentView?.isHidden ?? true), needsDisplay=\(contentView?.needsDisplay ?? false)"
-        fileLog("fadeIn gen=\(currentGeneration) alpha=\(self.alphaValue) frame=\(self.frame) level=\(self.level.rawValue) \(contentInfo) screens=[\(screenInfo)]")
+        DiagnosticLog.shared.event("recording_window.fade_in", fields: [
+            "generation": "\(currentGeneration)",
+            "alpha": "\(self.alphaValue)",
+            "frame": "\(self.frame)",
+            "level": "\(self.level.rawValue)",
+            "content": contentInfo,
+            "screens": screenInfo
+        ])
         
         // Reset window state to fix potential corruption after long runtime
         if isVisible && alphaValue == 0 {
@@ -115,7 +103,11 @@ final class RecordingWindow: NSPanel {
         display()
         
         logger.info("fadeIn: after orderFront, alpha: \(self.alphaValue), isVisible: \(self.isVisible), level=\(self.level.rawValue), frame=\(Int(self.frame.origin.x)),\(Int(self.frame.origin.y))")
-        fileLog("fadeIn after orderFront: frame=\(self.frame) visible=\(self.isVisible) onScreen=\(self.screen?.localizedName ?? "nil")")
+        DiagnosticLog.shared.event("recording_window.fade_in_ordered", fields: [
+            "frame": "\(self.frame)",
+            "visible": "\(self.isVisible)",
+            "has_screen": "\(self.screen != nil)"
+        ])
         
         NSAnimationContext.runAnimationGroup { context in
             context.duration = Constants.indicatorFadeIn
@@ -131,7 +123,11 @@ final class RecordingWindow: NSPanel {
         let currentGeneration = animationGeneration
         
         logger.info("fadeOut called (generation \(currentGeneration), current alpha: \(self.alphaValue), isVisible: \(self.isVisible))")
-        fileLog("fadeOut called gen=\(currentGeneration) alpha=\(self.alphaValue)")
+        DiagnosticLog.shared.event("recording_window.fade_out", fields: [
+            "generation": "\(currentGeneration)",
+            "alpha": "\(self.alphaValue)",
+            "visible": "\(self.isVisible)"
+        ])
         
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = Constants.indicatorFadeOut

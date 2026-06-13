@@ -2,44 +2,15 @@ import AppKit
 import os.log
 
 private let logger = Logger(subsystem: "com.swair.hearsay", category: "app")
+private let diagnosticLog = DiagnosticLog.shared
 
-// MARK: - File Logger for debugging intermittent issues
-private let fileLogger = FileLogger()
-
-final class FileLogger {
-    private let logURL: URL
-    private let queue = DispatchQueue(label: "com.swair.hearsay.filelogger")
-    
-    init() {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let hearsayDir = appSupport.appendingPathComponent("Hearsay")
-        try? FileManager.default.createDirectory(at: hearsayDir, withIntermediateDirectories: true)
-        logURL = hearsayDir.appendingPathComponent("debug.log")
-        
-        // Truncate if over 1MB
-        if let attrs = try? FileManager.default.attributesOfItem(atPath: logURL.path),
-           let size = attrs[.size] as? Int64, size > 1_000_000 {
-            try? FileManager.default.removeItem(at: logURL)
-        }
-    }
-    
-    func log(_ message: String, file: String = #file, function: String = #function, line: Int = #line) {
-        let fileName = (file as NSString).lastPathComponent
-        let timestamp = ISO8601DateFormatter().string(from: Date())
-        let entry = "[\(timestamp)] [\(fileName):\(line)] \(message)\n"
-        
-        queue.async {
-            if let data = entry.data(using: .utf8) {
-                if FileManager.default.fileExists(atPath: self.logURL.path) {
-                    if let handle = try? FileHandle(forWritingTo: self.logURL) {
-                        handle.seekToEndOfFile()
-                        handle.write(data)
-                        try? handle.close()
-                    }
-                } else {
-                    try? data.write(to: self.logURL)
-                }
-            }
+private extension DictationMode {
+    var diagnosticName: String {
+        switch self {
+        case .pasteAtCursor:
+            return "paste_at_cursor"
+        case .returnToCaller:
+            return "return_to_caller"
         }
     }
 }
@@ -86,6 +57,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         print("Hearsay: Starting up...")
+        diagnosticLog.event("app.launch", fields: [
+            "dev_mode": "\(Self.isDevMode)",
+            "process_id": "\(ProcessInfo.processInfo.processIdentifier)"
+        ])
         
         // Apply dock icon preference
         let showDockIcon = UserDefaults.standard.bool(forKey: "showDockIcon")
@@ -110,6 +85,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func applicationWillTerminate(_ notification: Notification) {
+        diagnosticLog.event("app.terminate")
         hotkeyMonitor?.stop()
         localAPIServer?.stop()
         indicatorDismissWorkItem?.cancel()
@@ -188,6 +164,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusBar.onCheckForUpdates = { [weak self] in
             self?.checkForUpdates()
         }
+
+        statusBar.onOpenDiagnosticLog = { [weak self] in
+            self?.openDiagnosticLog()
+        }
+
+        statusBar.onCopyDiagnosticLogs = { [weak self] in
+            self?.copyDiagnosticLogs()
+        }
+
+        statusBar.onEmailDiagnosticLogs = { [weak self] in
+            self?.emailDiagnosticLogs()
+        }
+
+        statusBar.onRevealDiagnosticLog = {
+            DiagnosticLog.shared.event("diagnostics.reveal_requested")
+            NSWorkspace.shared.activateFileViewerSelecting([DiagnosticLog.shared.logURL])
+        }
+
+        statusBar.onClearDiagnosticLogs = { [weak self] in
+            self?.clearDiagnosticLogs()
+        }
         
         statusBar.onQuit = {
             NSApp.terminate(nil)
@@ -246,6 +243,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             } else {
                 logger.warning("No microphone available")
             }
+            diagnosticLog.event("microphone.active_device_changed", fields: [
+                "has_active_device": "\(device != nil)"
+            ])
             self.updateRecorderDevice()
         }
     }
@@ -275,6 +275,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ScreenshotManager.shared.onScreenshotCaptured = { [weak self] count in
             guard let self = self else { return }
             logger.info("Screenshot captured: count=\(count)")
+            diagnosticLog.event("recording.screenshot_captured", fields: ["count": "\(count)"])
             SoundPlayer.shared.play(.screenshot)
             self.recordingIndicator.figureCount = count
             // Resize window to fit new indicator width
@@ -285,6 +286,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ClipboardManager.shared.onClipCaptured = { [weak self] count in
             guard let self = self else { return }
             logger.info("Clipboard copy captured: count=\(count)")
+            diagnosticLog.event("recording.clip_captured", fields: ["count": "\(count)"])
             self.recordingIndicator.clipCount = count
             // Resize window to fit the new badge
             self.recordingWindow.positionOnScreen(width: self.recordingIndicator.idealWidth)
@@ -296,8 +298,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             try server.start()
             localAPIServer = server
+            diagnosticLog.event("local_api.start")
         } catch {
             logger.error("Failed to start local API server: \(error.localizedDescription)")
+            diagnosticLog.event("local_api.start_failed", level: .error, fields: diagnosticLog.errorFields(for: error))
         }
     }
     
@@ -357,6 +361,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     transcriber = Transcriber(modelPath: modelPath)
                     statusBar.updateModelName(model.displayName)
                     logger.info("Using qwen_asr model: \(model.rawValue)")
+                    diagnosticLog.event("transcriber.configured", fields: [
+                        "backend": "qwen_asr",
+                        "model": model.rawValue
+                    ])
                 }
                 return true
 
@@ -367,6 +375,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     transcriber = WhisperTranscriber(modelName: model.rawValue)
                     statusBar.updateModelName(model.displayName)
                     logger.info("Using Whisper model: \(model.rawValue)")
+                    diagnosticLog.event("transcriber.configured", fields: [
+                        "backend": "whisper",
+                        "model": model.rawValue
+                    ])
                 }
                 return true
 
@@ -381,6 +393,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     transcriber = ParakeetTranscriber(model: parakeetModel)
                     statusBar.updateModelName(model.displayName)
                     logger.info("Using Parakeet model: \(model.rawValue)")
+                    diagnosticLog.event("transcriber.configured", fields: [
+                        "backend": "parakeet",
+                        "model": model.rawValue
+                    ])
                 }
                 return true
             }
@@ -395,10 +411,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 transcriber = Transcriber(modelPath: devModelPath)
                 statusBar.updateModelName("qwen3-asr-0.6b (dev)")
                 logger.info("Using development qwen_asr model")
+                diagnosticLog.event("transcriber.configured", fields: [
+                    "backend": "qwen_asr",
+                    "model": "qwen3-asr-0.6b",
+                    "dev_model": "true"
+                ])
             }
             return true
         }
 
+        if currentModelIdentifier != nil {
+            diagnosticLog.event("transcriber.unavailable", level: .warning)
+        }
         statusBar.updateModelName(nil)
         transcriber = nil
         currentModelIdentifier = nil
@@ -431,8 +455,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             do {
                 try await transcriber.prewarm()
                 logger.info("Speech model prewarm complete")
+                diagnosticLog.event("transcriber.prewarm.success")
             } catch {
                 logger.error("Speech model prewarm failed: \(error.localizedDescription)")
+                diagnosticLog.event("transcriber.prewarm.failed", level: .warning, fields: diagnosticLog.errorFields(for: error))
             }
         }
     }
@@ -463,16 +489,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             try beginRecording(mode: .pasteAtCursor)
         } catch CallerDictationError.busy(let state) {
             logger.warning("Hearsay is \(state.rawValue), ignoring hotkey start")
+            diagnosticLog.event("recording.start.ignored", level: .warning, fields: ["state": state.rawValue])
         } catch CallerDictationError.transcriberUnavailable {
             logger.error("No transcriber available!")
+            diagnosticLog.event("recording.start.failed", level: .error, fields: ["reason": "transcriber_unavailable"])
             showError("No model installed")
             showOnboardingForSetup()
         } catch CallerDictationError.microphonePermissionMissing {
             logger.error("Microphone permission not granted")
+            diagnosticLog.event("recording.start.failed", level: .error, fields: ["reason": "microphone_permission_missing"])
             showError("No mic access")
             showOnboardingForSetup()
         } catch {
             logger.error("Failed to start recording: \(error.localizedDescription)")
+            diagnosticLog.event("recording.start.failed", level: .error, fields: diagnosticLog.errorFields(for: error))
             showError("Start failed")
         }
     }
@@ -494,13 +524,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let micStatus = PermissionsManager.checkMicrophone()
         guard micStatus == .granted else {
             logger.error("Microphone permission not granted: \(String(describing: micStatus))")
+            diagnosticLog.event("recording.start.failed", level: .error, fields: ["reason": "microphone_permission_missing"])
             throw CallerDictationError.microphonePermissionMissing
         }
         
         isRecording = true
         activeDictationMode = mode
         logger.info("=== START RECORDING ===")
-        fileLogger.log("=== START RECORDING ===")
+        diagnosticLog.event("recording.start", fields: [
+            "mode": mode.diagnosticName,
+            "clipboard_capture_enabled": "\(ClipboardManager.isFeatureEnabled)"
+        ])
         
         // Play start sound
         SoundPlayer.shared.play(.recordingStart)
@@ -561,7 +595,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         
         logger.info("=== STOP RECORDING ===")
-        fileLogger.log("=== STOP RECORDING ===")
+        diagnosticLog.event("recording.stop_requested")
         isRecording = false
         
         // Play stop sound
@@ -576,27 +610,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         recordingIndicator.showClipCount = false
 
         logger.info("Recording stopped with \(figures.count) screenshot(s), \(clips.count) clip(s)")
+        diagnosticLog.event("recording.assets_captured", fields: [
+            "figure_count": "\(figures.count)",
+            "clip_count": "\(clips.count)"
+        ])
         
         // Stop recording and get audio file
         let stopResult = audioRecorder.stop()
         guard let audioURL = stopResult.url else {
             switch stopResult.reason {
             case .cancelledBeforeReady:
-                logger.info("Recording stopped before audio engine was ready; treating as too short, not recorder failure")
-                fileLogger.log("audioRecorder.stop() cancelled before ready")
-                recordingIndicator.setState(.error("Too short"))
+                var fields: [String: String] = [
+                    "stop_reason": "cancelled_before_ready",
+                    "startup_last_phase": stopResult.startupLastPhase ?? "unknown",
+                    "startup_timed_out": "\(stopResult.startupTimedOut)"
+                ]
+                if let elapsed = stopResult.startupElapsedSeconds {
+                    fields["startup_elapsed_seconds"] = String(format: "%.2f", elapsed)
+                }
+                if stopResult.startupTimedOut {
+                    logger.error("Recording stopped before audio engine was ready after startup timeout")
+                    fields["likely_reason"] = "coreaudio_startup_stalled"
+                    diagnosticLog.event("recording.startup_stalled", level: .error, fields: fields)
+                    recordingIndicator.setState(.error("Mic stalled"))
+                    failActiveCallerDictation("Microphone startup stalled")
+                } else {
+                    logger.info("Recording stopped before audio engine was ready; treating as too short, not recorder failure")
+                    fields["likely_reason"] = "released_before_audio_ready"
+                    diagnosticLog.event("recording.too_short", level: .warning, fields: fields)
+                    recordingIndicator.setState(.error("Too short"))
+                    failActiveCallerDictation("Recording was too short")
+                }
                 dismissIndicatorAfterDelay()
-                failActiveCallerDictation("Recording was too short")
             case .notRecording:
                 logger.warning("audioRecorder.stop() called while recorder was not recording")
+                diagnosticLog.event("recording.stop_ignored", level: .warning, fields: ["stop_reason": "not_recording"])
                 recordingWindow.fadeOut()
                 failActiveCallerDictation("Recording was not active")
             case .errorState:
                 logger.error("audioRecorder.stop() returned nil from recorder error state")
+                diagnosticLog.event("recording.stop_failed", level: .error, fields: ["stop_reason": "error_state"])
                 handleRecorderStopFailure()
                 failActiveCallerDictation("Recording failed")
             case .completed:
                 logger.error("audioRecorder.stop() completed without an audio URL")
+                diagnosticLog.event("recording.stop_failed", level: .error, fields: ["stop_reason": "missing_audio_url"])
                 handleRecorderStopFailure()
                 failActiveCallerDictation("Recording failed")
             }
@@ -606,6 +664,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Check if microphone captured silence (possible Core Audio issue)
         if stopResult.wasSilent {
             logger.error("Audio was silent! Peak level: \(stopResult.peakLevel)")
+            diagnosticLog.event("recording.silent_audio", level: .error, fields: [
+                "peak_level": "\(stopResult.peakLevel)"
+            ])
             recordingIndicator.setState(.error("No audio"))
             dismissIndicatorAfterDelay(extended: true)
             failActiveCallerDictation("No audio captured")
@@ -618,6 +679,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let attrs = try? FileManager.default.attributesOfItem(atPath: audioURL.path) {
             let size = attrs[.size] as? Int64 ?? 0
             logger.info("Audio file size: \(size) bytes")
+            diagnosticLog.event("recording.audio_ready", fields: [
+                "size_bytes": "\(size)",
+                "peak_level": "\(stopResult.peakLevel)"
+            ])
         }
         
         // Show transcribing state
@@ -631,6 +696,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         
         logger.info("Starting transcription with ID: \(transcriptionID.uuidString)")
+        diagnosticLog.event("transcription.start", fields: [
+            "id": String(transcriptionID.uuidString.prefix(8)),
+            "figure_count": "\(figures.count)",
+            "clip_count": "\(clips.count)"
+        ])
         
         // Transcribe
         Task {
@@ -644,9 +714,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 logger.info("Transcription \(transcriptionID.uuidString.prefix(8)): no model, checking if stale...")
                 guard self.currentTranscriptionID == transcriptionID else {
                     logger.info("Transcription \(transcriptionID.uuidString.prefix(8)): STALE (current: \(self.currentTranscriptionID?.uuidString ?? "nil")), skipping UI update")
+                    diagnosticLog.event("transcription.stale", level: .warning, fields: [
+                        "id": String(transcriptionID.uuidString.prefix(8)),
+                        "phase": "no_model"
+                    ])
                     return
                 }
                 logger.info("Transcription \(transcriptionID.uuidString.prefix(8)): showing error and scheduling dismiss")
+                diagnosticLog.event("transcription.failed", level: .error, fields: [
+                    "id": String(transcriptionID.uuidString.prefix(8)),
+                    "reason": "no_model"
+                ])
                 self.recordingIndicator.setState(.error("No model"))
                 self.dismissIndicatorAfterDelay()
                 self.failActiveCallerDictation("No transcription model is available")
@@ -668,11 +746,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // qwen_asr can intermittently return empty output.
                     // Retry once before fallback.
                     logger.warning("No transcription output on first attempt, retrying once")
+                    diagnosticLog.event("transcription.retry", level: .warning, fields: [
+                        "id": String(transcriptionID.uuidString.prefix(8)),
+                        "reason": "no_output"
+                    ])
                     do {
                         text = try await transcriber.transcribe(audioURL: audioURL)
                     } catch SpeechTranscriptionError.noOutput {
                         // Fallback: chunk audio and transcribe piece-by-piece.
                         logger.warning("Retry also returned no output, attempting chunked fallback")
+                        diagnosticLog.event("transcription.chunked_fallback", level: .warning, fields: [
+                            "id": String(transcriptionID.uuidString.prefix(8)),
+                            "audio_duration_seconds": String(format: "%.2f", audioDuration)
+                        ])
                         let chunkSeconds: Double = 2.0
                         let splitTimes = stride(from: chunkSeconds, to: audioDuration, by: chunkSeconds).map { $0 }
                         
@@ -689,6 +775,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                 }
                             } catch SpeechTranscriptionError.noOutput {
                                 logger.info("Chunk \(index) produced no output during fallback")
+                                diagnosticLog.event("transcription.chunk_no_output", level: .warning, fields: [
+                                    "id": String(transcriptionID.uuidString.prefix(8)),
+                                    "chunk_index": "\(index)"
+                                ])
                             }
                         }
                         AudioSplitter.cleanupSegments(chunks)
@@ -705,9 +795,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let timeline = TranscriptInterleaver.buildTimeline(figures: figures, clips: clips)
                 let timestamps = TranscriptInterleaver.splitTimestamps(for: timeline)
                 logger.info("Splitting audio at timestamps: \(timestamps)")
+                diagnosticLog.event("transcription.split_audio", fields: [
+                    "id": String(transcriptionID.uuidString.prefix(8)),
+                    "split_count": "\(timestamps.count)"
+                ])
 
                 if let segments = AudioSplitter.splitWAV(at: audioURL, timestamps: timestamps) {
                     logger.info("Audio split into \(segments.count) segments")
+                    diagnosticLog.event("transcription.audio_split", fields: [
+                        "id": String(transcriptionID.uuidString.prefix(8)),
+                        "segment_count": "\(segments.count)"
+                    ])
                     var transcripts: [String] = []
 
                     for (index, segment) in segments.enumerated() {
@@ -718,6 +816,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             // Short/silent segment is expected sometimes when splitting at
                             // insertion boundaries. Keep placeholder so alignment stays correct.
                             logger.info("Segment \(index) produced no transcription output; continuing")
+                            diagnosticLog.event("transcription.segment_no_output", level: .warning, fields: [
+                                "id": String(transcriptionID.uuidString.prefix(8)),
+                                "segment_index": "\(index)"
+                            ])
                             transcripts.append("")
                         }
                     }
@@ -731,6 +833,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // Fallback: couldn't split. Transcribe whole file, then append clip
                     // placeholders and a figure footer (positions are lost without a split).
                     logger.warning("Failed to split audio, transcribing whole file")
+                    diagnosticLog.event("transcription.split_failed", level: .warning, fields: [
+                        "id": String(transcriptionID.uuidString.prefix(8))
+                    ])
                     let rawText = try await transcriber.transcribe(audioURL: audioURL)
                     var body = rawText
                     for index in clips.indices {
@@ -745,11 +850,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let postProcessedText: String
             if CleanupModelDownloader.shared.isEnabled, self.cleanupManager.isReady {
                 logger.info("Running post processing on transcription...")
+                diagnosticLog.event("cleanup.start", fields: [
+                    "id": String(transcriptionID.uuidString.prefix(8)),
+                    "input_length": "\(text.count)"
+                ])
                 if let cleaned = await self.cleanupManager.clean(text: text) {
-                    logger.info("Post processing result: \(cleaned.prefix(50))...")
+                    logger.info("Post processing completed; output length: \(cleaned.count)")
+                    diagnosticLog.event("cleanup.success", fields: [
+                        "id": String(transcriptionID.uuidString.prefix(8)),
+                        "output_length": "\(cleaned.count)"
+                    ])
                     postProcessedText = cleaned
                 } else {
                     logger.info("Post processing returned nil, using original text")
+                    diagnosticLog.event("cleanup.fallback_to_original", level: .warning, fields: [
+                        "id": String(transcriptionID.uuidString.prefix(8))
+                    ])
                     postProcessedText = text
                 }
             } else {
@@ -765,6 +881,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 logger.info("Transcription \(transcriptionID.uuidString.prefix(8)): SUCCESS, checking if stale...")
                 guard self.currentTranscriptionID == transcriptionID else {
                     logger.info("Transcription \(transcriptionID.uuidString.prefix(8)): STALE (current: \(self.currentTranscriptionID?.uuidString ?? "nil")), skipping delivery")
+                    diagnosticLog.event("transcription.stale", level: .warning, fields: [
+                        "id": String(transcriptionID.uuidString.prefix(8)),
+                        "phase": "delivery"
+                    ])
                     return
                 }
 
@@ -786,6 +906,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 
                 // Save to history
                 HistoryStore.shared.add(text: finalText, durationSeconds: audioDuration, audioFilePath: savedAudioPath)
+                diagnosticLog.event("transcription.success", fields: [
+                    "id": String(transcriptionID.uuidString.prefix(8)),
+                    "duration_seconds": String(format: "%.2f", audioDuration),
+                    "raw_length": "\(text.count)",
+                    "processed_length": "\(postProcessedText.count)",
+                    "final_length": "\(finalText.count)",
+                    "delivery": self.activeDictationMode.diagnosticName
+                ])
 
                 self.clearActiveDictationSession()
                 
@@ -797,16 +925,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.dismissIndicatorAfterDelay()
             }
             
-            logger.info("Transcription complete: \(text.prefix(50))...")
+            logger.info("Transcription complete; output length: \(text.count)")
             
         } catch {
             await MainActor.run {
                 logger.info("Transcription \(transcriptionID.uuidString.prefix(8)): ERROR, checking if stale...")
                 guard self.currentTranscriptionID == transcriptionID else {
                     logger.info("Transcription \(transcriptionID.uuidString.prefix(8)): STALE (current: \(self.currentTranscriptionID?.uuidString ?? "nil")), skipping UI update")
+                    diagnosticLog.event("transcription.stale", level: .warning, fields: [
+                        "id": String(transcriptionID.uuidString.prefix(8)),
+                        "phase": "error"
+                    ])
                     return
                 }
                 logger.info("Transcription \(transcriptionID.uuidString.prefix(8)): showing error and scheduling dismiss")
+                var fields = diagnosticLog.errorFields(for: error)
+                fields["id"] = String(transcriptionID.uuidString.prefix(8))
+                diagnosticLog.event("transcription.failed", level: .error, fields: fields)
                 self.recordingIndicator.setState(.error("Failed"))
                 self.scheduleIndicatorDismiss(after: 2.0)
                 self.failActiveCallerDictation(error.localizedDescription)
@@ -889,25 +1024,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         currentDismissID = dismissID
         
         logger.info("Scheduling dismiss \(dismissID.uuidString.prefix(8)) after \(delay)s")
-        fileLogger.log("Scheduling dismiss \(dismissID.uuidString.prefix(8)) after \(delay)s")
+        diagnosticLog.event("indicator.dismiss_scheduled", fields: [
+            "dismiss_id": String(dismissID.uuidString.prefix(8)),
+            "delay_seconds": String(format: "%.2f", delay)
+        ])
         
         let workItem = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
             
             logger.info("Dismiss \(dismissID.uuidString.prefix(8)) firing...")
-            fileLogger.log("Dismiss \(dismissID.uuidString.prefix(8)) firing, isRecording=\(self.isRecording), state=\(self.recordingIndicator.state)")
+            diagnosticLog.event("indicator.dismiss_fired", fields: [
+                "dismiss_id": String(dismissID.uuidString.prefix(8)),
+                "is_recording": "\(self.isRecording)",
+                "state": "\(self.recordingIndicator.state)"
+            ])
             
             // Check if this dismiss was cancelled (a new recording started)
             guard self.currentDismissID == dismissID else {
                 logger.info("Dismiss \(dismissID.uuidString.prefix(8)) cancelled (current: \(self.currentDismissID?.uuidString ?? "nil"))")
-                fileLogger.log("Dismiss \(dismissID.uuidString.prefix(8)) CANCELLED - ID mismatch")
+                diagnosticLog.event("indicator.dismiss_cancelled", level: .warning, fields: [
+                    "dismiss_id": String(dismissID.uuidString.prefix(8)),
+                    "reason": "id_mismatch"
+                ])
                 return
             }
             
             // Never hide while actively recording
             if self.isRecording {
                 logger.info("Dismiss \(dismissID.uuidString.prefix(8)) skipped - recording is active")
-                fileLogger.log("Dismiss \(dismissID.uuidString.prefix(8)) SKIPPED - recording active")
+                diagnosticLog.event("indicator.dismiss_skipped", level: .warning, fields: [
+                    "dismiss_id": String(dismissID.uuidString.prefix(8)),
+                    "reason": "recording_active"
+                ])
                 return
             }
             
@@ -916,11 +1064,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             switch self.recordingIndicator.state {
             case .done, .error:
                 logger.info("Dismiss \(dismissID.uuidString.prefix(8)) proceeding - state is final, calling fadeOut")
-                fileLogger.log("Dismiss \(dismissID.uuidString.prefix(8)) EXECUTING fadeOut")
+                diagnosticLog.event("indicator.dismiss_executing", fields: [
+                    "dismiss_id": String(dismissID.uuidString.prefix(8))
+                ])
                 break
             case .recording, .transcribing:
                 logger.info("Dismiss \(dismissID.uuidString.prefix(8)) skipped - state is not final")
-                fileLogger.log("Dismiss \(dismissID.uuidString.prefix(8)) SKIPPED - state not final")
+                diagnosticLog.event("indicator.dismiss_skipped", level: .warning, fields: [
+                    "dismiss_id": String(dismissID.uuidString.prefix(8)),
+                    "reason": "state_not_final"
+                ])
                 return
             }
             
@@ -970,7 +1123,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         lastRecorderStopFailureAt = now
 
-        fileLogger.log("audioRecorder.stop() returned nil (recent failures: \(recentRecorderStopFailures))")
+        diagnosticLog.event("recording.recorder_reset", level: .error, fields: [
+            "recent_failures": "\(recentRecorderStopFailures)"
+        ])
 
         // Recreate recorder to clear any transient AVAudioEngine/CoreAudio bad state.
         setupAudioRecorder()
@@ -988,7 +1143,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func relaunchAppAfterRecorderFailure() {
         logger.error("Repeated recorder failures detected; relaunching app")
-        fileLogger.log("Repeated recorder failures detected; attempting app relaunch")
+        diagnosticLog.event("app.relaunch_requested", level: .error, fields: [
+            "reason": "repeated_recorder_failures"
+        ])
 
         recordingIndicator.setState(.error("Restarting app..."))
         recordingWindow.fadeIn()
@@ -1002,7 +1159,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async {
                 if let error {
                     logger.error("Failed to relaunch app: \(error.localizedDescription)")
-                    fileLogger.log("Failed to relaunch app: \(error.localizedDescription)")
+                    diagnosticLog.event("app.relaunch_failed", level: .error, fields: diagnosticLog.errorFields(for: error))
                     self.showError("Please restart Hearsay")
                     self.didAutoRelaunchForRecorderFailure = false
                     return
@@ -1019,6 +1176,90 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         recordingIndicator.setState(.error(message))
         recordingWindow.fadeIn()
         scheduleIndicatorDismiss(after: 2.0)
+    }
+
+    // MARK: - Diagnostics
+
+    private func openDiagnosticLog() {
+        do {
+            let snapshotURL = try DiagnosticLog.shared.writeSnapshotFile()
+            let bytes = (try? FileManager.default.attributesOfItem(atPath: snapshotURL.path)[.size] as? NSNumber)?.intValue ?? 0
+            diagnosticLog.event("diagnostics.opened", fields: [
+                "bytes": "\(bytes)"
+            ])
+            NSWorkspace.shared.open(snapshotURL)
+        } catch {
+            diagnosticLog.event("diagnostics.open_failed", level: .error, fields: diagnosticLog.errorFields(for: error))
+            showDiagnosticAlert(
+                title: "Could Not Open Logs",
+                message: "Hearsay could not create the diagnostic log snapshot."
+            )
+        }
+    }
+
+    private func copyDiagnosticLogs() {
+        let text = DiagnosticLog.shared.snapshotText()
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+
+        diagnosticLog.event("diagnostics.copied", fields: [
+            "bytes": "\(text.utf8.count)"
+        ])
+        showDiagnosticAlert(
+            title: "Diagnostic Logs Copied",
+            message: "The last day of metadata-only Hearsay diagnostic logs is on your clipboard. Raw transcripts, audio, clipboard text, screenshots, and prompts are not included."
+        )
+    }
+
+    private func emailDiagnosticLogs() {
+        do {
+            let snapshotURL = try DiagnosticLog.shared.writeSnapshotFile()
+            let bytes = (try? FileManager.default.attributesOfItem(atPath: snapshotURL.path)[.size] as? NSNumber)?.intValue ?? 0
+            diagnosticLog.event("diagnostics.email_requested", fields: [
+                "bytes": "\(bytes)"
+            ])
+
+            if let service = NSSharingService(named: .composeEmail),
+               service.canPerform(withItems: [snapshotURL]) {
+                service.subject = "Hearsay Diagnostic Logs"
+                service.perform(withItems: [snapshotURL])
+            } else {
+                let text = try String(contentsOf: snapshotURL, encoding: .utf8)
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
+                showDiagnosticAlert(
+                    title: "Diagnostic Logs Copied",
+                    message: "Mail sharing is not available, so the metadata-only diagnostic log was copied to your clipboard instead."
+                )
+            }
+        } catch {
+            diagnosticLog.event("diagnostics.email_failed", level: .error, fields: diagnosticLog.errorFields(for: error))
+            showDiagnosticAlert(
+                title: "Could Not Prepare Logs",
+                message: "Hearsay could not create the diagnostic log snapshot."
+            )
+        }
+    }
+
+    private func clearDiagnosticLogs() {
+        DiagnosticLog.shared.clear()
+        diagnosticLog.event("diagnostics.cleared")
+        showDiagnosticAlert(
+            title: "Diagnostic Logs Cleared",
+            message: "The local Hearsay diagnostic log has been cleared."
+        )
+    }
+
+    private func showDiagnosticAlert(title: String, message: String) {
+        NSApp.activate(ignoringOtherApps: true)
+
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
     
     // MARK: - Updates
@@ -1146,8 +1387,14 @@ extension AppDelegate: HearsayLocalAPIServerDelegate {
             try beginRecording(mode: request.mode)
             localAPIServer?.publishState(requestId: request.id, state: .recording)
             logger.info("Started caller dictation \(request.id.uuidString) for \(request.caller)")
+            diagnosticLog.event("caller_dictation.start", fields: [
+                "request_id": String(request.id.uuidString.prefix(8)),
+                "auto_stop": "\(request.autoStop)",
+                "metadata_keys": "\(request.metadata.keys.count)"
+            ])
         } catch {
             clearActiveDictationSession()
+            diagnosticLog.event("caller_dictation.start_failed", level: .error, fields: diagnosticLog.errorFields(for: error))
             throw error
         }
     }
@@ -1191,5 +1438,8 @@ extension AppDelegate: HearsayLocalAPIServerDelegate {
         recordingIndicator.setState(.error("Cancelled"))
         dismissIndicatorAfterDelay()
         logger.info("Cancelled caller dictation \(requestId.uuidString)")
+        diagnosticLog.event("caller_dictation.cancelled", level: .warning, fields: [
+            "request_id": String(requestId.uuidString.prefix(8))
+        ])
     }
 }

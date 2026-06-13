@@ -15,7 +15,7 @@ final class TextInserter {
 
     /// Insert text at the current cursor position, copying to clipboard permanently
     static func insert(_ text: String) {
-        insertLogger.info("Inserting text: \(text.prefix(50))...")
+        insertLogger.info("Inserting text; length=\(text.count)")
         copyToClipboard(text)
         simulatePaste()
     }
@@ -23,7 +23,7 @@ final class TextInserter {
     /// Insert text at the cursor without keeping it on the clipboard.
     /// Temporarily uses the clipboard for the paste, then restores the previous contents.
     static func insertWithoutClipboard(_ text: String) {
-        insertLogger.info("Inserting text (no clipboard): \(text.prefix(50))...")
+        insertLogger.info("Inserting text without keeping clipboard; length=\(text.count)")
         let pasteboard = NSPasteboard.general
 
         // Save current clipboard contents
