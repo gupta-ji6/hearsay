@@ -14,6 +14,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         case cleanup
         case shortcuts
         case postProcessing
+        case about
     }
     
     var onHotkeyChanged: (() -> Void)?
@@ -31,6 +32,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private var cleanupTab: DeterministicCleanupTabView!
     private var shortcutsTab: ShortcutReplacementTabView!
     private var postProcessingTab: CleanupTabView!
+    private var aboutTab: AboutTabView!
     
     convenience init() {
         let window = NSWindow(
@@ -96,10 +98,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         micItem.view = microphoneTab
         tabView.addTabViewItem(micItem)
         
-        // Shortcuts tab
+        // Text Replacements tab
         shortcutsTab = ShortcutReplacementTabView(frame: NSRect(x: 0, y: 0, width: 540, height: 400))
         let shortcutsItem = NSTabViewItem(identifier: "shortcuts")
-        shortcutsItem.label = "Shortcuts"
+        shortcutsItem.label = "Replacements"
         shortcutsItem.view = shortcutsTab
         tabView.addTabViewItem(shortcutsItem)
 
@@ -119,6 +121,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         postProcessingItem.label = "Post Processing"
         postProcessingItem.view = postProcessingTab
         tabView.addTabViewItem(postProcessingItem)
+
+        // About tab
+        aboutTab = AboutTabView(frame: NSRect(x: 0, y: 0, width: 540, height: 400))
+        let aboutItem = NSTabViewItem(identifier: "about")
+        aboutItem.label = "About"
+        aboutItem.view = aboutTab
+        tabView.addTabViewItem(aboutItem)
     }
     
     func show(tab: Tab = .settings) {
@@ -129,6 +138,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         cleanupTab.refresh()
         shortcutsTab.refresh()
         postProcessingTab.refresh()
+        aboutTab.refresh()
         
         switch tab {
         case .settings:
@@ -147,6 +157,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             tabView.selectTabViewItem(withIdentifier: "shortcuts")
         case .postProcessing:
             tabView.selectTabViewItem(withIdentifier: "postProcessing")
+        case .about:
+            tabView.selectTabViewItem(withIdentifier: "about")
         }
         
         window?.makeKeyAndOrderFront(nil)
@@ -180,6 +192,42 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 }
 
+private enum AppInfo {
+    static var displayName: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
+            ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String
+            ?? "Hearsay"
+    }
+
+    static var version: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown"
+    }
+
+    static var build: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "Unknown"
+    }
+
+    static var versionSummary: String {
+        "Version \(version)"
+    }
+
+    static var buildSummary: String {
+        "Build number \(build)"
+    }
+
+    static var bundleIdentifier: String {
+        Bundle.main.bundleIdentifier ?? "Unknown"
+    }
+
+    static var minimumSystemVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "LSMinimumSystemVersion") as? String ?? "Unknown"
+    }
+
+    static var copyright: String {
+        Bundle.main.object(forInfoDictionaryKey: "NSHumanReadableCopyright") as? String ?? ""
+    }
+}
+
 // MARK: - Settings Tab
 
 private class SettingsTabView: NSView {
@@ -189,6 +237,8 @@ private class SettingsTabView: NSView {
     private let iconView = NSImageView()
     private let titleLabel = NSTextField(labelWithString: "Hearsay")
     private let subtitleLabel = NSTextField(labelWithString: "Local Speech-to-Text")
+    private let versionLabel = NSTextField(labelWithString: AppInfo.versionSummary)
+    private let buildLabel = NSTextField(labelWithString: AppInfo.buildSummary)
     
     private let generalBox = NSBox()
     private let copyToClipboardCheckbox = NSButton(checkboxWithTitle: "Copy to Clipboard", target: nil, action: nil)
@@ -237,6 +287,16 @@ private class SettingsTabView: NSView {
         subtitleLabel.textColor = .secondaryLabelColor
         subtitleLabel.alignment = .center
         addSubview(subtitleLabel)
+
+        versionLabel.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+        versionLabel.textColor = .tertiaryLabelColor
+        versionLabel.alignment = .center
+        addSubview(versionLabel)
+
+        buildLabel.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+        buildLabel.textColor = .tertiaryLabelColor
+        buildLabel.alignment = .center
+        addSubview(buildLabel)
         
         // General box
         generalBox.title = "General"
@@ -283,8 +343,8 @@ private class SettingsTabView: NSView {
         
 
         
-        // Shortcuts box
-        shortcutsBox.title = "Shortcuts"
+        // Keyboard shortcuts box
+        shortcutsBox.title = "Keyboard Shortcuts"
         shortcutsBox.titleFont = .systemFont(ofSize: 12, weight: .semibold)
         addSubview(shortcutsBox)
         
@@ -425,7 +485,15 @@ private class SettingsTabView: NSView {
         y -= 20
         
         subtitleLabel.frame = NSRect(x: 0, y: y - 16, width: bounds.width, height: 16)
-        y -= 28
+        y -= 18
+
+        versionLabel.stringValue = AppInfo.versionSummary
+        versionLabel.frame = NSRect(x: 0, y: y - 14, width: bounds.width, height: 14)
+        y -= 14
+
+        buildLabel.stringValue = AppInfo.buildSummary
+        buildLabel.frame = NSRect(x: 0, y: y - 14, width: bounds.width, height: 14)
+        y -= 24
         
         // General box
         let generalH: CGFloat = 178
@@ -562,6 +630,200 @@ private class SettingsTabView: NSView {
         UserDefaults.standard.set(Int(NSEvent.ModifierFlags.option.rawValue), forKey: "screenshotModifiers")
         loadSettings()
         onHotkeyChanged?()
+    }
+}
+
+// MARK: - About Tab
+
+private class AboutTabView: NSView {
+    private let iconView = NSImageView()
+    private let titleLabel = NSTextField(labelWithString: AppInfo.displayName)
+    private let subtitleLabel = NSTextField(labelWithString: "Local Speech-to-Text")
+    private let versionLabel = NSTextField(labelWithString: AppInfo.versionSummary)
+    private let buildLabel = NSTextField(labelWithString: AppInfo.buildSummary)
+    private let infoBox = NSBox()
+    private let copyButton = NSButton(title: "Copy Details", target: nil, action: nil)
+    private let supportFolderButton = NSButton(title: "Open Support Folder", target: nil, action: nil)
+    private var rows: [AboutInfoRowView] = []
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        setupUI()
+        refresh()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func setupUI() {
+        if let icon = NSImage(named: NSImage.applicationIconName) {
+            iconView.image = icon
+        }
+        iconView.imageScaling = .scaleProportionallyUpOrDown
+        addSubview(iconView)
+
+        titleLabel.font = .systemFont(ofSize: 22, weight: .semibold)
+        titleLabel.alignment = .center
+        addSubview(titleLabel)
+
+        subtitleLabel.font = .systemFont(ofSize: 12)
+        subtitleLabel.textColor = .secondaryLabelColor
+        subtitleLabel.alignment = .center
+        addSubview(subtitleLabel)
+
+        versionLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        versionLabel.textColor = .secondaryLabelColor
+        versionLabel.alignment = .center
+        addSubview(versionLabel)
+
+        buildLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        buildLabel.textColor = .secondaryLabelColor
+        buildLabel.alignment = .center
+        addSubview(buildLabel)
+
+        infoBox.title = "App Information"
+        infoBox.titleFont = .systemFont(ofSize: 12, weight: .semibold)
+        addSubview(infoBox)
+
+        rows = Self.infoItems().map { item in
+            let row = AboutInfoRowView(title: item.title, value: item.value)
+            infoBox.contentView?.addSubview(row)
+            return row
+        }
+
+        copyButton.bezelStyle = .rounded
+        copyButton.target = self
+        copyButton.action = #selector(copyDetails(_:))
+        addSubview(copyButton)
+
+        supportFolderButton.bezelStyle = .rounded
+        supportFolderButton.target = self
+        supportFolderButton.action = #selector(openSupportFolder(_:))
+        addSubview(supportFolderButton)
+    }
+
+    func refresh() {
+        titleLabel.stringValue = AppInfo.displayName
+        versionLabel.stringValue = AppInfo.versionSummary
+        buildLabel.stringValue = AppInfo.buildSummary
+
+        for (row, item) in zip(rows, Self.infoItems()) {
+            row.setTitle(item.title, value: item.value)
+        }
+    }
+
+    override func layout() {
+        super.layout()
+
+        let pad: CGFloat = 20
+        var y = bounds.height - 34
+
+        let iconSize: CGFloat = 64
+        iconView.frame = NSRect(x: bounds.midX - iconSize / 2, y: y - iconSize, width: iconSize, height: iconSize)
+        y -= iconSize + 10
+
+        titleLabel.frame = NSRect(x: pad, y: y - 28, width: bounds.width - pad * 2, height: 28)
+        y -= 28
+        subtitleLabel.frame = NSRect(x: pad, y: y - 18, width: bounds.width - pad * 2, height: 18)
+        y -= 20
+        versionLabel.frame = NSRect(x: pad, y: y - 18, width: bounds.width - pad * 2, height: 18)
+        y -= 18
+        buildLabel.frame = NSRect(x: pad, y: y - 18, width: bounds.width - pad * 2, height: 18)
+        y -= 30
+
+        let boxWidth = min(CGFloat(680), bounds.width - pad * 2)
+        let rowHeight: CGFloat = 30
+        let boxHeight = CGFloat(rows.count) * rowHeight + 28
+        infoBox.frame = NSRect(x: bounds.midX - boxWidth / 2, y: y - boxHeight, width: boxWidth, height: boxHeight)
+
+        if let contentView = infoBox.contentView {
+            var rowY = contentView.bounds.height - rowHeight - 6
+            for row in rows {
+                row.frame = NSRect(x: 12, y: rowY, width: contentView.bounds.width - 24, height: rowHeight)
+                rowY -= rowHeight
+            }
+        }
+
+        let buttonY = max(pad, infoBox.frame.minY - 44)
+        supportFolderButton.sizeToFit()
+        copyButton.sizeToFit()
+        let supportWidth = supportFolderButton.frame.width + 20
+        let copyWidth = copyButton.frame.width + 20
+        let totalWidth = supportWidth + copyWidth + 12
+        supportFolderButton.frame = NSRect(x: bounds.midX - totalWidth / 2, y: buttonY, width: supportWidth, height: 30)
+        copyButton.frame = NSRect(x: supportFolderButton.frame.maxX + 12, y: buttonY, width: copyWidth, height: 30)
+    }
+
+    private static func infoItems() -> [(title: String, value: String)] {
+        var items = [
+            ("Version", AppInfo.version),
+            ("Build Number", AppInfo.build),
+            ("Bundle ID", AppInfo.bundleIdentifier),
+            ("Minimum macOS", AppInfo.minimumSystemVersion),
+            ("App Support", Constants.appSupportDirectory.path),
+            ("Models", Constants.modelsDirectory.path),
+            ("Diagnostic Log", Constants.diagnosticLogURL.path)
+        ]
+
+        if !AppInfo.copyright.isEmpty {
+            items.append(("Copyright", AppInfo.copyright))
+        }
+
+        return items
+    }
+
+    private static func detailsText() -> String {
+        infoItems()
+            .map { "\($0.title): \($0.value)" }
+            .joined(separator: "\n")
+    }
+
+    @objc private func copyDetails(_ sender: NSButton) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(Self.detailsText(), forType: .string)
+    }
+
+    @objc private func openSupportFolder(_ sender: NSButton) {
+        try? FileManager.default.createDirectory(at: Constants.appSupportDirectory, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(Constants.appSupportDirectory)
+    }
+}
+
+private class AboutInfoRowView: NSView {
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let valueLabel = NSTextField(labelWithString: "")
+
+    init(title: String, value: String) {
+        super.init(frame: .zero)
+        setupUI()
+        setTitle(title, value: value)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func setupUI() {
+        titleLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        titleLabel.textColor = .secondaryLabelColor
+        addSubview(titleLabel)
+
+        valueLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        valueLabel.textColor = .labelColor
+        valueLabel.lineBreakMode = .byTruncatingMiddle
+        valueLabel.isSelectable = true
+        addSubview(valueLabel)
+    }
+
+    func setTitle(_ title: String, value: String) {
+        titleLabel.stringValue = title
+        valueLabel.stringValue = value
+        valueLabel.toolTip = value
+    }
+
+    override func layout() {
+        super.layout()
+
+        let titleWidth: CGFloat = 130
+        titleLabel.frame = NSRect(x: 0, y: 6, width: titleWidth, height: 18)
+        valueLabel.frame = NSRect(x: titleWidth + 12, y: 5, width: bounds.width - titleWidth - 12, height: 20)
     }
 }
 
@@ -1994,9 +2256,9 @@ private class CleanupRuleRowView: NSView, NSTextFieldDelegate {
 // MARK: - Shortcut Replacement Tab
 
 private class ShortcutReplacementTabView: NSView {
-    private let titleLabel = NSTextField(labelWithString: "Shortcuts")
+    private let titleLabel = NSTextField(labelWithString: "Text Replacements")
     private let subtitleLabel = NSTextField(labelWithString: "Replace spoken phrases like my email with saved text snippets.")
-    private let enabledCheckbox = NSButton(checkboxWithTitle: "Enable shortcuts", target: nil, action: nil)
+    private let enabledCheckbox = NSButton(checkboxWithTitle: "Enable text replacements", target: nil, action: nil)
     private let shortcutsBox = NSBox()
     private let headerLabel = NSTextField(labelWithString: "On        Key                                                      Value")
     private let scrollView = NSScrollView()
@@ -2038,7 +2300,7 @@ private class ShortcutReplacementTabView: NSView {
         enabledCheckbox.action = #selector(enabledChanged(_:))
         addSubview(enabledCheckbox)
 
-        shortcutsBox.title = "Shortcut Replacements"
+        shortcutsBox.title = "Replacement Rules"
         shortcutsBox.titleFont = .systemFont(ofSize: 12, weight: .semibold)
         addSubview(shortcutsBox)
 
