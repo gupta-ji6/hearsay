@@ -1591,7 +1591,7 @@ private class HistoryTabView: NSView, NSTableViewDataSource, NSTableViewDelegate
     private let scrollView = NSScrollView()
     private let tableView = NSTableView()
     private let clearButton = NSButton(title: "Clear All", target: nil, action: nil)
-    private let copyButton = NSButton(title: "Copy Selected", target: nil, action: nil)
+    private let copyHintLabel = NSTextField(labelWithString: "Double-click a line to copy it.")
     private let emptyLabel = NSTextField(labelWithString: "No transcriptions yet")
     
     private var items: [TranscriptionItem] = []
@@ -1633,11 +1633,11 @@ private class HistoryTabView: NSView, NSTableViewDataSource, NSTableViewDelegate
         clearButton.target = self
         clearButton.action = #selector(clearAll(_:))
         addSubview(clearButton)
-        
-        copyButton.bezelStyle = .rounded
-        copyButton.target = self
-        copyButton.action = #selector(copySelected(_:))
-        addSubview(copyButton)
+
+        copyHintLabel.font = .systemFont(ofSize: 11)
+        copyHintLabel.textColor = .secondaryLabelColor
+        copyHintLabel.alignment = .right
+        addSubview(copyHintLabel)
     }
     
     func refresh() {
@@ -1662,10 +1662,14 @@ private class HistoryTabView: NSView, NSTableViewDataSource, NSTableViewDelegate
         
         // Buttons at bottom
         clearButton.sizeToFit()
-        copyButton.sizeToFit()
         
         clearButton.frame.origin = NSPoint(x: pad, y: pad)
-        copyButton.frame.origin = NSPoint(x: pad + clearButton.frame.width + 12, y: pad)
+        copyHintLabel.frame = NSRect(
+            x: clearButton.frame.maxX + 16,
+            y: pad + 6,
+            width: bounds.width - clearButton.frame.maxX - pad - 16,
+            height: 16
+        )
         
         // Table fills rest
         scrollView.frame = NSRect(
