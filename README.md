@@ -1,6 +1,6 @@
 <h1>  <img src="assets/icon_128.png" alt="Hearsay icon" width="30"/> Hearsay</h1>
 
-**[Download Hearsay 1.0.23 DMG](https://github.com/swairshah/hearsay/releases/download/v1.0.23/Hearsay-1.0.23.dmg)**
+**[Download Hearsay 1.0.24 DMG](https://github.com/swairshah/hearsay/releases/download/v1.0.24/Hearsay-1.0.24.dmg)**
 
 Browse all [Releases](https://github.com/swairshah/hearsay/releases).
 
