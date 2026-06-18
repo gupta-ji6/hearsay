@@ -1341,6 +1341,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.prewarmActiveTranscriber()
             }
         }
+        controller.isTranscriptionInProgress = { [weak self] in
+            self?.isTranscribing ?? false
+        }
         controller.onCleanupSettingsChanged = { [weak self] in
             guard let self = self else { return }
             if CleanupModelDownloader.shared.isEnabled && CleanupModelDownloader.shared.isModelInstalled() {
